@@ -1,0 +1,11 @@
+[extend]
+useDefault = true
+
+# The self-check fixtures in redact_output.py are invented tokens. A redaction
+# tool has to carry sample secrets to prove it cuts them.
+[allowlist]
+description = "redact_output.py self-check fixtures"
+regexTarget = "match"
+regexes = [
+  '''AbCdEf0123456789ghijklmnopqrstuvwxyz''',
+]
