@@ -11,7 +11,7 @@ Pick the rules in ~/.claude/redact.toml; `--list-rules` prints them.
 Run `redact_output.py --self-check` to verify both directions: secrets are cut,
 ordinary code is not.
 """
-import json, os, re, sys
+import ipaddress, json, os, re, sys
 from collections import Counter
 from math import log2
 from typing import Callable, NamedTuple
@@ -71,7 +71,11 @@ _WG_KEY = re.compile(
 )
 
 # bcrypt / argon2 / scrypt hashes — offline-crackable, treat as secrets
-_HASH = re.compile(r'\$2[aby]\$\d{2}\$[A-Za-z0-9./]{53}|\$argon2\S+|\$scrypt\S+')
+_HASH = re.compile(
+    r'\$2[aby]\$\d{2}\$[A-Za-z0-9./]{53}'
+    r'|\$(?:argon2(?:id|i|d)|scrypt)\$[A-Za-z0-9$,=+/._\-]{20,}'
+    r'|\$(?:1|5|6|7|y|gy|apr1|md5|sha1)\$[A-Za-z0-9./$,=+_\-]{12,}'
+)
 
 # ponytail: DOTALL needed — private keys span multiple lines
 _SSH_KEY = re.compile(
@@ -133,6 +137,14 @@ _NETRC = re.compile(
     re.IGNORECASE,
 )
 
+# A password handed straight to a password-setting command. Anchored to the
+# command name: a quoted string on its own is prose.
+_PW_COMMAND = re.compile(
+    r'\b(wgpw|htpasswd|chpasswd|smbpasswd|mkpasswd|openssl\s+passwd)'
+    r'([^\n\'"]{0,60}[\'"])([^\'"\n]{4,})([\'"])'
+)
+
+
 # Key material the PEM rule does not cover.
 _PUTTY_PPK = re.compile(r'(Private-Lines:\s*\d+\s*\n)(?:[A-Za-z0-9+/=]+[ \t]*\n?)+')
 _K8S_KEY_DATA = re.compile(
@@ -172,6 +184,12 @@ _PUBLIC_IP = re.compile(
     r'\b(?!10\.)(?!127\.)(?!0\.)(?!255\.)(?!169\.254\.)(?!192\.168\.)'
     r'(?!172\.(?:1[6-9]|2\d|3[01])\.)'
     r'\d{1,3}(?:\.\d{1,3}){3}\b'
+)
+
+# IPv6. Match the shape, then let ipaddress decide: is_global already rules out
+# loopback, link-local, unique-local and the 2001:db8::/32 documentation range.
+_PUBLIC_IP6 = re.compile(
+    r'(?<![:.\w])[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{0,4}){2,7}(?![:.\w])'
 )
 
 # Phone numbers without a country code. Opt-in: this is the shape that also
@@ -234,6 +252,21 @@ def _redact_entropy(match: re.Match) -> str:
     return match.group(1) + '[REDACTED:entropy]'
 
 
+def _redact_ip6(match: re.Match) -> str:
+    try:
+        address = ipaddress.IPv6Address(match.group(0))
+    except ValueError:
+        return match.group(0)
+    return '[REDACTED:public_ip6]' if address.is_global else match.group(0)
+
+
+def _redact_pw_command(match: re.Match) -> str:
+    value = match.group(3)
+    if value.startswith('$') or not _random_enough(value):
+        return match.group(0)
+    return f'{match.group(1)}{match.group(2)}[REDACTED:pw_command]{match.group(4)}'
+
+
 def _keyed(name: str) -> Callable[[re.Match], str]:
     """Assignment-shaped rules: cut the value only when it looks random."""
     def repl(match: re.Match) -> str:
@@ -283,6 +316,7 @@ _RULES = (
     Rule('netrc', _NETRC, '\\1[REDACTED:netrc]'),
     Rule('cli_userpass', _CLI_USERPASS, '\\1[REDACTED:cli_userpass]'),
     Rule('cli_password', _CLI_PASSWORD, '\\1[REDACTED:cli_password]'),
+    Rule('pw_command', _PW_COMMAND, _redact_pw_command),
     Rule('bip39_seed', _BIP39_SEED, '\\1[REDACTED:bip39_seed]'),
     Rule('env_secret', _ENV_SECRET, _keyed('env_secret')),
     Rule('secret_word', _SECRET_WORD, _keyed('secret_word')),
@@ -300,6 +334,7 @@ _RULES = (
     Rule('home_path', _HOME_PATH, '\\1/[REDACTED:home_path]', False),
     Rule('mac_addr', _MAC_ADDR, '[REDACTED:mac_addr]', False),
     Rule('public_ip', _PUBLIC_IP, '[REDACTED:public_ip]', False),
+    Rule('public_ip6', _PUBLIC_IP6, _redact_ip6, False),
     Rule('phone_loose', _PHONE_LOOSE, '[REDACTED:phone_loose]', False),
     Rule('entropy', _ENTROPY, _redact_entropy, False),
 )
@@ -423,6 +458,8 @@ _MUST_CUT = [
     ('netrc', "machine api.example.com login bob password s3cr3tpassw0rd"),
     ('cli_userpass', "curl -u admin:s3cr3tpassw0rd https://api.example.com"),
     ('cli_password', "mysqldump --password=s3cr3tpassw0rd appdb"),
+    ('pw_command', "docker run wg-easy wgpw 'Tr0ub4dor-Stapler-91'"),
+    ('hash', "root:$6$rounds=5000$abcdefgh$" + "x" * 86 + ":19000:0:99999:7:::"),
     ('bip39_seed', "mnemonic: legal winner thank year wave sausage worth useful legal winner thank yellow"),
     ('env_secret', "DB_PASS=hunter2xyz"),
     ('secret_word', "passphrase=correcthorsebattery"),
@@ -443,8 +480,8 @@ _MUST_KEEP = [
     "PASSWORD = os.environ.get('X')",
     "parser.add_argument('--token', help='api token')",
     "commit 9fceb02d0ae598e95dc970b74767f19372d61af8",
-    "sha256:e2fc4e5012d16e7fe466f5291c476431beaa1f9b90a5c2125b493ed28e2aba57",
-    "id: 550e8400-e29b-41d4-a716-446655440000",
+        "sha256:e2fc4e5012d16e7fe466f5291c476431beaa1f9b90a5c2125b493ed28e2aba57",
+        "id: 550e8400-e29b-41d4-a716-446655440000",
     "2026-09-05T13:07:41.123456Z",
     "ts 1757000000000 ms",
     "v1.24.3+build.20260905",
@@ -456,11 +493,14 @@ _MUST_KEEP = [
     "except: pass\nprint(count)",
     "User: John Smith <john@company.internal>",
     "kernel 7.1.11-zen1-1-zen",
-    "h1:AbCdEf0123456789ghijklmnopqrstuvwxyzABCDEFG=",
+        "h1:AbCdEf0123456789ghijklmnopqrstuvwxyzABCDEFG=",
     "pytest -k 'test_token_parsing'",
     "curl --user-agent claude/1 https://example.com",
     "License: MIT",
     "PUBLIC_KEY=ssh-ed25519",
+    "htpasswd -c /etc/nginx/.htpasswd admin",
+    'openssl passwd -6 "$PASS"',
+
 ]
 
 # Rules that are off by default: one sample each, checked with the rule on.
@@ -471,17 +511,27 @@ _OPTIN_CUT = [
     ('home_path', "reading /home/jsmith/.config/app.toml"),
     ('mac_addr', "link/ether a4:83:e7:1b:2c:3d brd ff:ff:ff:ff:ff:ff"),
     ('public_ip', "connected from 203.0.113.47:44321"),
+    ('public_ip6', "inet6 2a01:4f8:1c1c:abcd::1/64 scope global"),
     ('phone_loose', "call 415-555-0142 for support"),
     ('entropy', "OPAQUE=Xk7pQ2mZr9TvB4nLs6WyD3fH8jCe1AuG"),
 ]
 
-# Entropy is the noisy rule, so it gets its own keep list.
-_ENTROPY_KEEP = [
-    "sha256:e2fc4e5012d16e7fe466f5291c476431beaa1f9b90a5c2125b493ed28e2aba57",
-    "h1:AbCdEf0123456789ghijklmnopqrstuvwxyzABCDEFG=",
-    "id: 550e8400-e29b-41d4-a716-446655440000",
-    "commit 9fceb02d0ae598e95dc970b74767f19372d61af8",
-]
+# The noisy rules get a keep list of their own, checked with the rule on.
+_RULE_KEEP = {
+    'entropy': [
+        "sha256:e2fc4e5012d16e7fe466f5291c476431beaa1f9b90a5c2125b493ed28e2aba57",
+        "h1:AbCdEf0123456789ghijklmnopqrstuvwxyzABCDEFG=",
+        "id: 550e8400-e29b-41d4-a716-446655440000",
+        "commit 9fceb02d0ae598e95dc970b74767f19372d61af8",
+    ],
+    'public_ip6': [
+        "inet6 ::1/128 scope host",
+        "inet6 fe80::1e69:7aff:fe3c:1/64 scope link",
+        "inet6 fd00:1234::5/64 scope global",
+        "docs use 2001:db8::1 as the example address",
+        "started 12:34:56, link/ether 00:11:22:33:44:55",
+    ],
+}
 
 
 def self_check() -> int:
@@ -502,11 +552,12 @@ def self_check() -> int:
         rules = tuple(r for r in _RULES if r.name == name)
         if f'[REDACTED:{name}]' not in redact_regex(sample, rules):
             bad.append(f"opt-in rule {name} did not fire on its own sample")
-    entropy = tuple(r for r in _RULES if r.name == 'entropy')
-    for sample in _ENTROPY_KEEP:
-        out = redact_regex(sample, entropy)
-        if out != sample:
-            bad.append(f"entropy mangled: {sample!r} -> {out!r}")
+    for name, samples in _RULE_KEEP.items():
+        rules = tuple(r for r in _RULES if r.name == name)
+        for sample in samples:
+            out = redact_regex(sample, rules)
+            if out != sample:
+                bad.append(f"{name} mangled: {sample!r} -> {out!r}")
 
     for line in bad:
         print(line)
