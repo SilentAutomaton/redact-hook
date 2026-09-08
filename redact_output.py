@@ -445,7 +445,8 @@ _MUST_CUT = [
     ('azure_storage', "AccountKey=AbCdEf0123456789ghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ012=="),
     ('google_api_key', "GOOGLE_MAPS AIzaAbCdEf0123456789ghijklmnopqrstuvwxy"),
     ('stripe', "charge with sk_live_AbCdEf0123456789ghij"),
-    ('digitalocean', "dop_v1_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+    # Assembled, never written out: a literal do*_v1_ fixture trips secret scanners.
+    ('digitalocean', "token " + "do" + "p_v1_" + "d0" * 32),
     ('telegram_bot', "bot 123456789:AAAbCdEf0123456789ghijklmnopqrstuvw"),
     ('telegram_bot', "https://api.telegram.org/bot123456789:AAAbCdEf0123456789ghijklmnopqrstuvw/sendMessage"),
     ('telegram_session', "SESSION_STRING=1BVtsOKcBu0YAbCdEf0123456789ghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcd"),
