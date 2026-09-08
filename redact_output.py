@@ -1,17 +1,25 @@
 #!/usr/bin/env python3
-"""PostToolUse hook: redact secrets from tool output before Claude sees it.
+"""PostToolUse hook: redact secrets and PII from tool output before Claude sees it.
 
 Reads stdin JSON {tool_name, tool_input, tool_response},
 writes {"hookSpecificOutput": {...}} to stdout.
 
-Two layers, both regex:
-  1. Known secret shapes — token prefixes, assignments, SSH keys, JWTs, WireGuard
-  2. PII — phone numbers, Luhn-valid card numbers
+Every rule has a name, and every replacement says which rule fired
+([REDACTED:stripe]), so the name to switch off is visible in the output itself.
+Pick the rules in ~/.claude/redact.toml; `--list-rules` prints them.
 
 Run `redact_output.py --self-check` to verify both directions: secrets are cut,
 ordinary code is not.
 """
 import json, os, re, sys
+from collections import Counter
+from math import log2
+from typing import Callable, NamedTuple
+
+try:
+    import tomllib
+except ImportError:  # config file needs Python 3.11
+    tomllib = None
 
 _PREFIX = re.compile(
     r'(dckr_pat_|tok_|sk-|ghp_|gho_|github_pat_|AKIA|hf_|xoxb-|xoxp-|Bearer\s+'
@@ -67,16 +75,15 @@ _HASH = re.compile(r'\$2[aby]\$\d{2}\$[A-Za-z0-9./]{53}|\$argon2\S+|\$scrypt\S+'
 
 # ponytail: DOTALL needed — private keys span multiple lines
 _SSH_KEY = re.compile(
-    r'-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----'
+    r'-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----'
     r'.*?'
-    r'-----END (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----',
+    r'-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----',
     re.DOTALL,
 )
 
-_CONN_STR = re.compile(
-    r'(postgresql|mysql|mongodb|redis|amqp|jdbc:\w+)://[^\s@/]+:[^\s@/]+@',
-    re.IGNORECASE,
-)
+# Credentials in a URL, any scheme: postgresql://, amqp://, clickhouse://,
+# sftp://, ldap://. The user name stays; only the password is the secret.
+_CONN_STR = re.compile(r'([a-z][a-z0-9+.\-]*://[^\s/:@]+:)[^\s/@]+@')
 
 _JWT = re.compile(
     r'eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}'
@@ -87,9 +94,106 @@ _JWT = re.compile(
 _PHONE = re.compile(r'(?<![\d+])\+\d[\d\s().\-]{7,17}\d(?!\d)')
 _CARD = re.compile(r'(?<![\d.])([3-6](?:[ -]?\d){12,18})(?![\d.])')
 
-# aggressive — off by default; catches unknown-format secrets but may over-redact git SHAs etc.
-_LONG_HEX = re.compile(r'\b[a-fA-F0-9]{32,}\b')
-_LONG_OPAQUE = re.compile(r'[A-Za-z0-9_\-]{40,}')
+# Vendor formats. Each is anchored to a prefix no ordinary string carries.
+_GOOGLE_API_KEY = re.compile(r'AIza[0-9A-Za-z_\-]{35}')
+_GCP_KEY_ID = re.compile(r'("private_key_id"\s*:\s*")[a-f0-9]{40}(")')
+_STRIPE = re.compile(r'\b(?:sk|rk|pk)_(?:live|test)_[0-9A-Za-z]{16,}')
+_DIGITALOCEAN = re.compile(r'\bdo[opr]_v1_[a-f0-9]{64}\b')
+_AZURE_STORAGE = re.compile(r'(AccountKey=)[A-Za-z0-9+/]{60,}={0,2}', re.IGNORECASE)
+_SLACK_WEBHOOK = re.compile(r'(hooks\.slack\.com/services/)[A-Za-z0-9/]{20,}')
+_DISCORD_WEBHOOK = re.compile(r'(discord(?:app)?\.com/api/webhooks/\d+/)[\w\-]{20,}')
+_TELEGRAM_BOT = re.compile(r'(?:(?<=/bot)|(?<!\w))\d{8,10}:AA[\w\-]{33}\b')
+# MTProto application credentials and Telethon/Pyrogram session strings. The
+# session string alone is a full account takeover, so it outranks the bot token.
+_TELEGRAM_API_HASH = re.compile(
+    r'((?:api_hash|app_hash|tg_api_hash)\s*[:=]\s*["\']?)[a-f0-9]{32}',
+    re.IGNORECASE,
+)
+_TELEGRAM_SESSION = re.compile(
+    r'((?:string_?session|session_?string|session)\s*[:=]\s*["\']?)[A-Za-z0-9+/=_\-]{80,}',
+    re.IGNORECASE,
+)
+
+# HTTP request auth. Shows up in `curl -v`, in proxy logs, in MCP transports.
+_BASIC_AUTH = re.compile(r'(Authorization:\s*Basic\s+)[A-Za-z0-9+/=]{8,}', re.IGNORECASE)
+_AUTH_HEADER = re.compile(
+    r'((?:X-)?(?:Api|Auth|Access|Session)[-_](?:Key|Token|Secret)\s*:\s*)\S{8,}',
+    re.IGNORECASE,
+)
+_COOKIE = re.compile(
+    r'((?:Set-)?Cookie:[^\n]*?\b\w*(?:session|sid|token|csrf|auth)\w*\s*=\s*)[^;\s]{8,}',
+    re.IGNORECASE,
+)
+
+# Credentials on a command line or in ~/.netrc.
+_CLI_USERPASS = re.compile(r'((?:-u|--user)\s+[^\s:]+:)\S+')
+_CLI_PASSWORD = re.compile(r'(--(?:password|pass|token|api-key)[= ])\S{4,}')
+_NETRC = re.compile(
+    r'(machine\s+\S+(?:\s+(?:login|account)\s+\S+)?\s+password\s+)\S+',
+    re.IGNORECASE,
+)
+
+# Key material the PEM rule does not cover.
+_PUTTY_PPK = re.compile(r'(Private-Lines:\s*\d+\s*\n)(?:[A-Za-z0-9+/=]+[ \t]*\n?)+')
+_K8S_KEY_DATA = re.compile(
+    r'((?:client-key-data|client-certificate-data)\s*:\s*)[A-Za-z0-9+/=]{20,}'
+)
+# A wallet seed is 12-24 short words. Anchored to the field name, because a
+# bare run of English words is prose.
+_BIP39_SEED = re.compile(
+    r'((?:mnemonic|seed(?:\s+phrase)?|recovery(?:\s+phrase)?)\s*[:=]\s*)'
+    r'(?:[a-z]{3,8}\s+){11,23}[a-z]{3,8}',
+    re.IGNORECASE,
+)
+
+# Environment variable names. Uppercase only: that is what keeps the Python
+# keyword `pass` and argparse's `--token` out of it.
+_ENV_SECRET = re.compile(
+    r'\b(?![A-Z0-9_]*PUBLIC)((?:[A-Z][A-Z0-9]*_)*(?:PASS|PASSWD|PWD|PASSPHRASE|CREDS|CREDENTIALS'
+    r'|SECRET|TOKEN|APIKEY|KEY|DSN|PAT)'
+    r'|PGPASSWORD|MYSQL_PWD|SECRET_KEY_BASE)'
+    r'[ \t]*=[ \t]*["\']?([^\s"\']{4,})',
+)
+# Two words that mean one thing in any case. `key` and `auth` are not here on
+# purpose; they appear in ordinary code far more often than in secrets.
+_SECRET_WORD = re.compile(
+    r'\b(passphrase|credentials)\s*[:=]\s*["\']?([A-Za-z0-9._\-/+]{6,})["\']?',
+    re.IGNORECASE,
+)
+
+# Identity. Off by default: cutting paths and mail addresses breaks ordinary
+# work with git log, stack traces and CODEOWNERS.
+_EMAIL = re.compile(r'\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b')
+_SSN = re.compile(r'\b\d{3}-\d{2}-\d{4}\b')
+_IBAN = re.compile(r'\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b')
+_HOME_PATH = re.compile(r'(/(?:home|Users))/[^/\s:"\']+')
+_MAC_ADDR = re.compile(r'\b(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}\b')
+_PUBLIC_IP = re.compile(
+    r'\b(?!10\.)(?!127\.)(?!0\.)(?!255\.)(?!169\.254\.)(?!192\.168\.)'
+    r'(?!172\.(?:1[6-9]|2\d|3[01])\.)'
+    r'\d{1,3}(?:\.\d{1,3}){3}\b'
+)
+
+# Phone numbers without a country code. Opt-in: this is the shape that also
+# fits part numbers and ticket ids, which is why the default rule needs the +.
+_PHONE_LOOSE = re.compile(
+    r'(?<![\d\-.])(?:\(\d{3}\)[ .\-]?|\d{1,3}[ .\-])?\d{3}[ .\-]\d{2,3}[ .\-]\d{2,4}(?![\d\-.])'
+)
+
+# Entropy. Only assignment values, never bare text, and never after a hash
+# label. Off by default: it misses about a third of real secrets and invents
+# false positives, so the named rules above do the real work.
+_ENTROPY = re.compile(
+    r'(?<!h1)(?<!md5)(?<!sha1)(?<!sha256)(?<!sha512)'
+    r'([:=]\s*["\']?)([A-Za-z0-9+/_\-]{16,128})'
+)
+_ENTROPY_SKIP = re.compile(
+    r'^(?:[0-9a-f]{7,64}'                                       # git sha, digest
+    r'|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'  # uuid
+    r'|[\d._\-]+'                                               # numbers, versions
+    r'|v?\d[\w.\-+]*)$',                                        # v1.24.3+build
+    re.IGNORECASE,
+)
 
 
 def _random_enough(value: str) -> bool:
@@ -109,37 +213,162 @@ def _luhn_ok(digits: str) -> bool:
     return total % 10 == 0
 
 
+
 def _redact_card(match: re.Match) -> str:
     digits = re.sub(r'[ -]', '', match.group(1))
     if 13 <= len(digits) <= 19 and _luhn_ok(digits):
-        return '[REDACTED-CARD]'
+        return '[REDACTED:card]'
     return match.group(0)
 
 
-def redact_regex(text: str, aggressive: bool = False) -> str:
-    text = _SSH_KEY.sub('[REDACTED-SSH-KEY]', text)
-    text = _AWG_INIT.sub('[REDACTED-AWG-INIT]', text)
-    text = _AWG_PARAMS.sub(r'\1\2[REDACTED]', text)
-    text = _WG_KEY.sub(r'\1[REDACTED-KEY]', text)
-    text = _HASH.sub('[REDACTED-HASH]', text)
-    text = _DOCKER_AUTH.sub(r'\1[REDACTED]\2', text)
+def _shannon(value: str) -> float:
+    counts = Counter(value)
+    size = len(value)
+    return -sum((n / size) * log2(n / size) for n in counts.values())
+
+
+def _redact_entropy(match: re.Match) -> str:
+    value = match.group(2)
+    if _ENTROPY_SKIP.match(value) or _shannon(value) < 3.5:
+        return match.group(0)
+    return match.group(1) + '[REDACTED:entropy]'
+
+
+def _keyed(name: str) -> Callable[[re.Match], str]:
+    """Assignment-shaped rules: cut the value only when it looks random."""
+    def repl(match: re.Match) -> str:
+        if not _random_enough(match.group(2)):
+            return match.group(0)
+        return f'{match.group(1)}=[REDACTED:{name}]'
+    return repl
+
+
+def _prefixed(match: re.Match) -> str:
+    if not _random_enough(match.group(2)):
+        return match.group(0)
+    return match.group(1) + '[REDACTED:prefix]'
+
+
+class Rule(NamedTuple):
+    name: str
+    pattern: re.Pattern
+    repl: object          # replacement template, or a callable taking the match
+    on: bool = True       # part of the default set
+
+
+# Order matters. Structural and vendor rules run before the generic assignment
+# and prefix rules, so the placeholder names the most specific rule that fits.
+_RULES = (
+    Rule('ssh_key', _SSH_KEY, '[REDACTED:ssh_key]'),
+    Rule('putty_ppk', _PUTTY_PPK, '\\1[REDACTED:putty_ppk]\n'),
+    Rule('awg_init', _AWG_INIT, '[REDACTED:awg_init]'),
+    Rule('awg_params', _AWG_PARAMS, '\\1\\2[REDACTED:awg_params]'),
+    Rule('wg_key', _WG_KEY, '\\1[REDACTED:wg_key]'),
+    Rule('hash', _HASH, '[REDACTED:hash]'),
+    Rule('docker_auth', _DOCKER_AUTH, '\\1[REDACTED:docker_auth]\\2'),
+    Rule('k8s_key_data', _K8S_KEY_DATA, '\\1[REDACTED:k8s_key_data]'),
+    Rule('gcp_key_id', _GCP_KEY_ID, '\\1[REDACTED:gcp_key_id]\\2'),
+    Rule('azure_storage', _AZURE_STORAGE, '\\1[REDACTED:azure_storage]'),
+    Rule('google_api_key', _GOOGLE_API_KEY, '[REDACTED:google_api_key]'),
+    Rule('stripe', _STRIPE, '[REDACTED:stripe]'),
+    Rule('digitalocean', _DIGITALOCEAN, '[REDACTED:digitalocean]'),
+    Rule('telegram_bot', _TELEGRAM_BOT, '[REDACTED:telegram_bot]'),
+    Rule('telegram_session', _TELEGRAM_SESSION, '\\1[REDACTED:telegram_session]'),
+    Rule('telegram_api_hash', _TELEGRAM_API_HASH, '\\1[REDACTED:telegram_api_hash]'),
+    Rule('slack_webhook', _SLACK_WEBHOOK, '\\1[REDACTED:slack_webhook]'),
+    Rule('discord_webhook', _DISCORD_WEBHOOK, '\\1[REDACTED:discord_webhook]'),
+    Rule('basic_auth', _BASIC_AUTH, '\\1[REDACTED:basic_auth]'),
+    Rule('auth_header', _AUTH_HEADER, '\\1[REDACTED:auth_header]'),
+    Rule('cookie', _COOKIE, '\\1[REDACTED:cookie]'),
+    Rule('netrc', _NETRC, '\\1[REDACTED:netrc]'),
+    Rule('cli_userpass', _CLI_USERPASS, '\\1[REDACTED:cli_userpass]'),
+    Rule('cli_password', _CLI_PASSWORD, '\\1[REDACTED:cli_password]'),
+    Rule('bip39_seed', _BIP39_SEED, '\\1[REDACTED:bip39_seed]'),
+    Rule('env_secret', _ENV_SECRET, _keyed('env_secret')),
+    Rule('secret_word', _SECRET_WORD, _keyed('secret_word')),
     # ponytail: assignment before prefix — avoids double-[REDACTED] when both match same value
-    text = _ASSIGNMENT.sub(
-        lambda m: f'{m.group(1)}=[REDACTED]' if _random_enough(m.group(2)) else m.group(0),
-        text,
-    )
-    text = _PREFIX.sub(
-        lambda m: m.group(1) + '[REDACTED]' if _random_enough(m.group(2)) else m.group(0),
-        text,
-    )
-    text = _CONN_STR.sub(lambda m: m.group(1) + '://[REDACTED]@', text)
-    text = _JWT.sub('[REDACTED-JWT]', text)
-    text = _PHONE.sub('[REDACTED-PHONE]', text)
-    text = _CARD.sub(_redact_card, text)
-    if aggressive:
-        text = _LONG_HEX.sub('[REDACTED-HEX]', text)
-        text = _LONG_OPAQUE.sub('[REDACTED-OPAQUE]', text)
+    Rule('assignment', _ASSIGNMENT, _keyed('assignment')),
+    Rule('prefix', _PREFIX, _prefixed),
+    Rule('conn_str', _CONN_STR, '\\1[REDACTED:conn_str]@'),
+    Rule('jwt', _JWT, '[REDACTED:jwt]'),
+    Rule('phone', _PHONE, '[REDACTED:phone]'),
+    Rule('card', _CARD, _redact_card),
+    # Off by default.
+    Rule('email', _EMAIL, '[REDACTED:email]', False),
+    Rule('ssn', _SSN, '[REDACTED:ssn]', False),
+    Rule('iban', _IBAN, '[REDACTED:iban]', False),
+    Rule('home_path', _HOME_PATH, '\\1/[REDACTED:home_path]', False),
+    Rule('mac_addr', _MAC_ADDR, '[REDACTED:mac_addr]', False),
+    Rule('public_ip', _PUBLIC_IP, '[REDACTED:public_ip]', False),
+    Rule('phone_loose', _PHONE_LOOSE, '[REDACTED:phone_loose]', False),
+    Rule('entropy', _ENTROPY, _redact_entropy, False),
+)
+
+_DEFAULT_RULES = tuple(rule for rule in _RULES if rule.on)
+
+
+def _guard(repl, allow):
+    """Single place the allowlist applies: an allowed match is left alone."""
+    def sub(match: re.Match) -> str:
+        if any(pattern.search(match.group(0)) for pattern in allow):
+            return match.group(0)
+        return repl(match) if callable(repl) else match.expand(repl)
+    return sub
+
+
+def redact_regex(text: str, rules=None, allow=()) -> str:
+    for rule in _DEFAULT_RULES if rules is None else rules:
+        text = rule.pattern.sub(_guard(rule.repl, allow), text)
     return text
+
+
+def _env_list(name: str) -> set:
+    return {part.strip() for part in os.environ.get(name, "").split(",") if part.strip()}
+
+
+def load_config() -> dict:
+    """Read ~/.claude/redact.toml. A broken config must never take the hook down."""
+    path = os.environ.get("REDACT_CONFIG") or os.path.expanduser("~/.claude/redact.toml")
+    if not os.path.exists(path):
+        return {}
+    if tomllib is None:
+        print("redact: config needs Python 3.11 or newer, using defaults", file=sys.stderr)
+        return {}
+    try:
+        with open(path, "rb") as handle:
+            return tomllib.load(handle)
+    except Exception as exc:
+        print(f"redact: cannot read {path}: {exc}", file=sys.stderr)
+        return {}
+
+
+def active_rules(config: dict) -> tuple:
+    off = set(config.get("disable", [])) | _env_list("REDACT_DISABLE")
+    on = set(config.get("enable", [])) | _env_list("REDACT_ENABLE")
+    if os.environ.get("REDACT_AGGRESSIVE"):
+        on.add("entropy")
+    rules = [r for r in _RULES if (r.on or r.name in on) and r.name not in off]
+    for spec in config.get("rule", []):
+        name = spec.get("name", "custom")
+        if name in off:
+            continue
+        try:
+            pattern = re.compile(spec["pattern"])
+        except (KeyError, re.error) as exc:
+            print(f"redact: skipping rule {name!r}: {exc}", file=sys.stderr)
+            continue
+        rules.append(Rule(name, pattern, spec.get("replacement", f"[REDACTED:{name}]")))
+    return tuple(rules)
+
+
+def allow_patterns(config: dict) -> tuple:
+    out = []
+    for expr in config.get("allow", []):
+        try:
+            out.append(re.compile(expr))
+        except re.error as exc:
+            print(f"redact: skipping allow {expr!r}: {exc}", file=sys.stderr)
+    return tuple(out)
 
 
 def build_updated_response(data: dict, redacted: str) -> object:
@@ -167,40 +396,130 @@ def build_updated_response(data: dict, redacted: str) -> object:
 
 _SKIP_TOOLS = frozenset(os.environ.get("REDACT_SKIP_TOOLS", "WebFetch,WebSearch").split(","))
 
+# One sample per default rule. Every value here is invented.
 _MUST_CUT = [
-    "ghp_AbCdEf0123456789ghijklmnopqrstuvwxyz",
-    "password = h4nter2xyz",
-    "PresharedKey = abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPq=",
-    "postgresql://user:s3cret@db.local/app",
-    "call +7 999 123-45-67 now",
-    "card 4111 1111 1111 1111 on file",
-    "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----",
+    ('ssh_key', "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXk=\n-----END OPENSSH PRIVATE KEY-----"),
+    ('putty_ppk', "Private-Lines: 2\nAAAAgQCabcdefghijklmnop\nQQQQbbbbccccddddeeee\n"),
+    ('awg_init', "I1 = <b 0x52454347abcdef0123456789abcdef>"),
+    ('awg_params', "Jc = 5\nJmin = 10\nS1 = 37"),
+    ('wg_key', "PresharedKey = AbCdEf0123456789ghijklmnopqrstuvwxyzABCDEFG="),
+    ('hash', "root:$2b$12$AbCdEf0123456789ghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ:0:0"),
+    ('docker_auth', '{"auths":{"registry.local":{"auth":"dXNlcjpteXBhc3N3b3JkMTIzNDU2"}}}'),
+    ('k8s_key_data', "    client-key-data: LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQo="),
+    ('gcp_key_id', '"private_key_id": "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b"'),
+    ('azure_storage', "AccountKey=AbCdEf0123456789ghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ012=="),
+    ('google_api_key', "GOOGLE_MAPS AIzaAbCdEf0123456789ghijklmnopqrstuvwxy"),
+    ('stripe', "charge with sk_live_AbCdEf0123456789ghij"),
+    ('digitalocean', "dop_v1_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+    ('telegram_bot', "bot 123456789:AAAbCdEf0123456789ghijklmnopqrstuvw"),
+    ('telegram_bot', "https://api.telegram.org/bot123456789:AAAbCdEf0123456789ghijklmnopqrstuvw/sendMessage"),
+    ('telegram_session', "SESSION_STRING=1BVtsOKcBu0YAbCdEf0123456789ghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcd"),
+    ('telegram_api_hash', "api_hash = 0123456789abcdef0123456789abcdef"),
+    ('slack_webhook', "https://hooks.slack.com/services/T00000000/B00000000/AbCdEf0123456789ghij"),
+    ('discord_webhook', "https://discord.com/api/webhooks/123456789012345678/AbCdEf0123456789ghij"),
+    ('basic_auth', "Authorization: Basic dXNlcjpzZWNyZXRwYXNzd29yZA=="),
+    ('auth_header', "X-Api-Key: AbCdEf0123456789ghij"),
+    ('cookie', "Set-Cookie: sessionid=8xk2mfq9wz1p4v7b3n5j6h0g; Path=/"),
+    ('netrc', "machine api.example.com login bob password s3cr3tpassw0rd"),
+    ('cli_userpass', "curl -u admin:s3cr3tpassw0rd https://api.example.com"),
+    ('cli_password', "mysqldump --password=s3cr3tpassw0rd appdb"),
+    ('bip39_seed', "mnemonic: legal winner thank year wave sausage worth useful legal winner thank yellow"),
+    ('env_secret', "DB_PASS=hunter2xyz"),
+    ('secret_word', "passphrase=correcthorsebattery"),
+    ('assignment', "password=hunter2xyz"),
+    ('prefix', "pushed with ghp_AbCdEf0123456789ghijklmnopqrstuvwxyz"),
+    ('conn_str', "postgresql://app:s3cr3tpassw0rd@db.local/app"),
+    ('jwt', "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.AbCdEf0123456789ghij"),
+    ('phone', "call +7 999 123-45-67 now"),
+    ('card', "card 4111 1111 1111 1111 on file"),
 ]
 
+# Ordinary output that must come back byte-identical under the default rules.
 _MUST_KEEP = [
     "_DOCKER_AUTH = re.compile(r'x')",
+    "config = {'key': 'value', 'token': 'placeholder'}",
+    "auth: enabled\ntoken: ${GITHUB_TOKEN}",
+    "PASSWORD=$DB_PASSWORD",
+    "PASSWORD = os.environ.get('X')",
+    "parser.add_argument('--token', help='api token')",
+    "commit 9fceb02d0ae598e95dc970b74767f19372d61af8",
+    "sha256:e2fc4e5012d16e7fe466f5291c476431beaa1f9b90a5c2125b493ed28e2aba57",
+    "id: 550e8400-e29b-41d4-a716-446655440000",
+    "2026-09-05T13:07:41.123456Z",
+    "ts 1757000000000 ms",
+    "v1.24.3+build.20260905",
+    "0.0.0.0:8080->80/tcp, :::5432->5432/tcp",
+    "inet 192.168.1.42/24 brd 192.168.1.255",
+    "aGVsbG8gd29ybGQgdGhpcyBpcyBiYXNlNjQgcGFkZGluZ3M=",
     "checks/npm_check.py",
     "systemd-ask-password --echo",
     "except: pass\nprint(count)",
-    "aGVsbG8gd29ybGQgdGhpcyBpcyBiYXNlNjQgcGFkZGluZ3M=",
-    "PASSWORD = os.environ.get('X')",
-    "ts 1757000000000 ms",
+    "User: John Smith <john@company.internal>",
+    "kernel 7.1.11-zen1-1-zen",
+    "h1:AbCdEf0123456789ghijklmnopqrstuvwxyzABCDEFG=",
+    "pytest -k 'test_token_parsing'",
+    "curl --user-agent claude/1 https://example.com",
+    "License: MIT",
+    "PUBLIC_KEY=ssh-ed25519",
+]
+
+# Rules that are off by default: one sample each, checked with the rule on.
+_OPTIN_CUT = [
+    ('email', "reach bob@example.org for access"),
+    ('ssn', "SSN: 123-45-6789"),
+    ('iban', "IBAN: DE89370400440532013000"),
+    ('home_path', "reading /home/jsmith/.config/app.toml"),
+    ('mac_addr', "link/ether a4:83:e7:1b:2c:3d brd ff:ff:ff:ff:ff:ff"),
+    ('public_ip', "connected from 203.0.113.47:44321"),
+    ('phone_loose', "call 415-555-0142 for support"),
+    ('entropy', "OPAQUE=Xk7pQ2mZr9TvB4nLs6WyD3fH8jCe1AuG"),
+]
+
+# Entropy is the noisy rule, so it gets its own keep list.
+_ENTROPY_KEEP = [
+    "sha256:e2fc4e5012d16e7fe466f5291c476431beaa1f9b90a5c2125b493ed28e2aba57",
+    "h1:AbCdEf0123456789ghijklmnopqrstuvwxyzABCDEFG=",
+    "id: 550e8400-e29b-41d4-a716-446655440000",
+    "commit 9fceb02d0ae598e95dc970b74767f19372d61af8",
 ]
 
 
 def self_check() -> int:
     bad = []
-    for sample in _MUST_CUT:
-        if "REDACTED" not in redact_regex(sample):
-            bad.append(f"not cut: {sample!r}")
+    for name, sample in _MUST_CUT:
+        out = redact_regex(sample)
+        if f'[REDACTED:{name}]' not in out:
+            bad.append(f"rule {name} did not fire on its own sample")
+    covered = {name for name, _ in _MUST_CUT}
+    for rule in _DEFAULT_RULES:
+        if rule.name not in covered:
+            bad.append(f"rule {rule.name} has no _MUST_CUT sample")
     for sample in _MUST_KEEP:
         out = redact_regex(sample)
         if out != sample:
             bad.append(f"mangled: {sample!r} -> {out!r}")
+    for name, sample in _OPTIN_CUT:
+        rules = tuple(r for r in _RULES if r.name == name)
+        if f'[REDACTED:{name}]' not in redact_regex(sample, rules):
+            bad.append(f"opt-in rule {name} did not fire on its own sample")
+    entropy = tuple(r for r in _RULES if r.name == 'entropy')
+    for sample in _ENTROPY_KEEP:
+        out = redact_regex(sample, entropy)
+        if out != sample:
+            bad.append(f"entropy mangled: {sample!r} -> {out!r}")
+
     for line in bad:
         print(line)
-    print(f"{len(_MUST_CUT)} secrets, {len(_MUST_KEEP)} clean samples, {len(bad)} failures")
+    print(f"{len(_MUST_CUT)} secrets, {len(_MUST_KEEP)} clean samples, "
+          f"{len(_OPTIN_CUT)} opt-in, {len(bad)} failures")
     return 1 if bad else 0
+
+
+def list_rules() -> int:
+    active = {rule.name for rule in active_rules(load_config())}
+    for rule in _RULES:
+        print(f"{'on ' if rule.name in active else 'off'}  {rule.name}")
+    return 0
 
 
 def main() -> None:
@@ -209,18 +528,18 @@ def main() -> None:
     if data.get("tool_name") in _SKIP_TOOLS:
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "updatedToolOutput": resp}}))
         return
-    aggressive = bool(os.environ.get("REDACT_AGGRESSIVE"))
+    config = load_config()
 
     if isinstance(resp, dict):
         if "file" in resp and isinstance(resp.get("file"), dict):
             raw = resp["file"].get("content", "")
-        elif "stdout" in resp:
-            raw = resp.get("stdout", "")
         else:
-            raw = json.dumps(resp)
+            raw = "\n".join(str(resp.get(k, "")) for k in ("stdout", "stderr") if resp.get(k))
+    elif isinstance(resp, list):
+        raw = json.dumps(resp)
     else:
         raw = str(resp)
-    redacted = redact_regex(raw, aggressive=aggressive)
+    redacted = redact_regex(raw, active_rules(config), allow_patterns(config))
     updated = build_updated_response(data, redacted)
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "updatedToolOutput": updated}}))
 
@@ -228,4 +547,6 @@ def main() -> None:
 if __name__ == "__main__":
     if "--self-check" in sys.argv:
         sys.exit(self_check())
+    if "--list-rules" in sys.argv:
+        sys.exit(list_rules())
     main()

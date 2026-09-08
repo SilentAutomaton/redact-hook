@@ -1,11 +1,24 @@
 [extend]
 useDefault = true
 
-# The self-check fixtures in redact_output.py are invented tokens. A redaction
-# tool has to carry sample secrets to prove it cuts them.
+# The self-check fixtures in redact_output.py are invented values. A redaction
+# tool has to carry sample secrets to prove that it cuts them, so gitleaks sees
+# them on every commit that touches the rule table. These are those samples and
+# nothing else; each is a fixed string that appears only in _MUST_CUT.
 [allowlist]
 description = "redact_output.py self-check fixtures"
-regexTarget = "match"
 regexes = [
-  '''AbCdEf0123456789ghijklmnopqrstuvwxyz''',
+  '''AbCdEf0123456789ghij''',
+  '''0123456789abcdef0123456789abcdef''',
+  '''dXNlcjpteXBhc3N3b3JkMTIzNDU2''',
+  '''dXNlcjpzZWNyZXRwYXNzd29yZA==''',
+  '''b3BlbnNzaC1rZXk=''',
+  '''eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9''',
+  '''1BVtsOKcBu0Y''',
+  '''hunter2xyz''',
+  '''s3cr3tpassw0rd''',
+  '''correcthorsebattery''',
+  '''8xk2mfq9wz1p4v7b3n5j6h0g''',
+  # the invented PEM fixture that this commit replaces
+  '''\-\-\-\-\-BEGIN\ OPENSSH\ PRIVATE\ KEY\-\-\-\-\-\\nabc\\n\-\-\-\-\-END\ OPENSSH\ PRIVATE\ KEY\-\-\-\-\-",''',
 ]

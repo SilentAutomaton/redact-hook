@@ -27,10 +27,13 @@ python3 redact_output.py --self-check
 
 ## Rules
 
-1. A new pattern ships with a `_MUST_CUT` case **and** a `_MUST_KEEP` case.
+1. A new pattern ships as a named `Rule` with a default_on decision, a
+   `_MUST_CUT` case **and** a `_MUST_KEEP` case.
    Over-redaction is the failure that makes the hook unusable: once ordinary
    code comes back mangled, people turn the hook off and the secrets flow
-   again. Every pattern must prove it leaves normal text alone.
+   again. Every pattern must prove it leaves normal text alone. `--self-check`
+   fails if a default rule has no sample, so the rule table cannot outgrow its
+   tests.
 2. Nothing personal is committed. No keys, no home paths, no dumps. Sample
    data is invented; a real key never enters the repository.
 

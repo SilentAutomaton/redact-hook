@@ -32,9 +32,11 @@ Verify:
 
 ```bash
 python3 ~/.claude/hooks/redact_output.py --self-check
+python3 ~/.claude/hooks/redact_output.py --list-rules
 ```
 
-It must report `0 failures` and exit 0.
+`--self-check` must report `0 failures` and exit 0. `--list-rules` prints every
+rule name with `on` or `off`.
 
 ### 3. Wire into settings.json
 
@@ -75,9 +77,32 @@ echo "DB_PASSWORD=hunter2xyz" > /tmp/redact_verify.txt
 
 Then ask Claude to read `/tmp/redact_verify.txt`. The value must appear as `[REDACTED]`.
 
+### 6. Optional: choose the rules
+
+Eight rules are off by default: `email`, `ssn`, `iban`, `home_path`, `mac_addr`,
+`public_ip`, `phone_loose`, `entropy`. Ask the user whether they want any of
+them, and whether any default rule is wrong for their work. If so, write
+`~/.claude/redact.toml`:
+
+```toml
+disable = ["phone"]
+enable  = ["home_path", "email"]
+allow   = ["example\\.com"]
+
+[[rule]]
+name    = "internal_ticket"
+pattern = "ACME-\\d{6}"
+```
+
+Every replacement carries its rule name — `[REDACTED:env_secret]` — so the user
+can read the name to disable straight out of the output.
+
 ## Environment variables
 
 | Variable | Default | Effect |
 |---|---|---|
-| `REDACT_AGGRESSIVE` | unset | Set to `1` to also redact 32+ char hex strings and 40+ char opaque strings |
+| `REDACT_DISABLE` | unset | Comma-separated rule names to switch off |
+| `REDACT_ENABLE` | unset | Comma-separated rule names to switch on |
 | `REDACT_SKIP_TOOLS` | `WebFetch,WebSearch` | Comma-separated tool names to skip entirely |
+| `REDACT_CONFIG` | `~/.claude/redact.toml` | Config file path |
+| `REDACT_AGGRESSIVE` | unset | `1` is an alias for `REDACT_ENABLE=entropy` |
