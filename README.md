@@ -37,7 +37,7 @@ Pure regex. No network call, no model, no dependencies — one file and the stan
 | `awg_init` | AmneziaWG `I1 = <b 0x…>` fake TLS blobs | on |
 | `awg_params` | AmneziaWG `Jc`, `Jmin`, `Jmax`, `S1`, `S2`, `H1`–`H4` | on |
 | `wg_key` | 44-char base64 after `PrivateKey`/`PublicKey`/`PresharedKey`/`PeerKey` | on |
-| `hash` | bcrypt, argon2, scrypt password hashes | on |
+| `hash` | bcrypt, argon2, scrypt and `crypt(3)` hashes — `$6$`, `$1$`, `$5$`, `$y$`, `$apr1$`, so `/etc/shadow` and `.htpasswd` are covered | on |
 | `docker_auth` | `"auth": "…"` in `config.json` | on |
 | `k8s_key_data` | kubeconfig `client-key-data`, `client-certificate-data` | on |
 | `gcp_key_id` | `"private_key_id"` in a service-account JSON | on |
@@ -56,6 +56,7 @@ Pure regex. No network call, no model, no dependencies — one file and the stan
 | `netrc` | `password` in a `machine …` line | on |
 | `cli_userpass` | `curl -u user:pass` | on |
 | `cli_password` | `--password=`, `--token=`, `--api-key=` | on |
+| `pw_command` | the literal password given to `wgpw`, `htpasswd`, `chpasswd`, `smbpasswd`, `mkpasswd`, `openssl passwd` | on |
 | `bip39_seed` | 12–24 word wallet seed after `mnemonic`/`seed`/`recovery phrase` | on |
 | `env_secret` | `UPPER_SNAKE` names ending `_PASS`, `_PWD`, `_SECRET`, `_TOKEN`, `_KEY`, `_DSN`, `_PAT` … plus `PGPASSWORD`, `MYSQL_PWD` | on |
 | `secret_word` | `passphrase=`, `credentials=` in any case | on |
@@ -71,21 +72,31 @@ Pure regex. No network call, no model, no dependencies — one file and the stan
 | `home_path` | the user name in `/home/…` and `/Users/…` | **off** |
 | `mac_addr` | MAC addresses | **off** |
 | `public_ip` | IPv4 outside the private ranges | **off** |
+| `public_ip6` | IPv6 in global scope — loopback, link-local, unique-local and `2001:db8::/32` are left alone | **off** |
 | `phone_loose` | phone numbers with no country code | **off** |
 | `entropy` | assignment values with Shannon entropy ≥ 3.5 | **off** |
 
 The rules are tuned against false positives, and the self-check enforces it: `re.compile(...)`, `PASSWORD = os.environ.get('X')`, `PUBLIC_KEY=ssh-ed25519`, `${GITHUB_TOKEN}`, git SHAs, UUIDs, `sha256:` digests and Go `h1:` hashes all come back byte-identical.
 
-The seven off-by-default rules are off because cutting mail addresses, home paths and IPs breaks ordinary work with `git log`, stack traces and `ip addr`. Entropy is off because it misses about a third of real secrets and invents false positives; the named rules do the real work.
+The eight off-by-default rules are off because cutting mail addresses, home paths and IP addresses breaks ordinary work with `git log`, stack traces and `ip addr`. `public_ip6` is off for the same reason as `public_ip`: switch it on with `enable = ["public_ip6"]` when a transcript must not carry your server addresses. Entropy is off because it misses about a third of real secrets and invents false positives; the named rules do the real work.
 
 ## Installation
 
-### 1. Copy the hook
+Python 3.8 or newer, no packages to install. Python 3.11 adds `tomllib`, which
+the optional config file needs.
+
+### 1. Get the hook and check it
 
 ```bash
-mkdir -p ~/.claude/hooks
-cp redact_output.py ~/.claude/hooks/redact_output.py
-chmod +x ~/.claude/hooks/redact_output.py
+git clone https://github.com/SilentAutomaton/redact-hook.git
+cd redact-hook
+python3 redact_output.py --self-check
+```
+
+The self-check must print `0 failures` before you install anything. Then:
+
+```bash
+install -Dm755 redact_output.py ~/.claude/hooks/redact_output.py
 ```
 
 ### 2. Add to settings.json
@@ -111,9 +122,32 @@ Edit `~/.claude/settings.json` and add to the `hooks` section:
 }
 ```
 
+Write the path in full. Claude Code does not expand `~` or `$HOME` in a hook
+`command`, and a hook that cannot start redacts nothing.
+
+`"matcher": ".*"` runs the hook after every tool. To leave a tool alone, name it
+in `REDACT_SKIP_TOOLS` rather than narrowing the matcher — the default already
+skips `WebFetch` and `WebSearch`, whose output is public anyway.
+
 ### 3. Restart Claude Code
 
-Hooks are loaded at session start.
+Hooks are loaded at session start. Confirm the hook is live:
+
+```bash
+python3 ~/.claude/hooks/redact_output.py --list-rules
+```
+
+Then ask Claude to read a file holding a fake key and check that the value comes
+back as `[REDACTED:...]`.
+
+### Updating
+
+```bash
+cd redact-hook && git pull
+install -Dm755 redact_output.py ~/.claude/hooks/redact_output.py
+```
+
+Restart Claude Code afterwards. Your `~/.claude/redact.toml` is untouched.
 
 ## Choosing the rules
 
