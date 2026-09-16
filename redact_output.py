@@ -99,18 +99,18 @@ _PHONE = re.compile(r'(?<![\d+])\+\d[\d\s().\-]{7,17}\d(?!\d)')
 _CARD = re.compile(r'(?<![\d.])([3-6](?:[ -]?\d){12,18})(?![\d.])')
 
 # Vendor formats. Each is anchored to a prefix no ordinary string carries.
-_GOOGLE_API_KEY = re.compile(r'AIza[0-9A-Za-z_\-]{35}')
-_GCP_KEY_ID = re.compile(r'("private_key_id"\s*:\s*")[a-f0-9]{40}(")')
+_GOOGLE_API_KEY = re.compile(r'AIza[0-9A-Za-z_\-]{4,}')
+_GCP_KEY_ID = re.compile(r'("private_key_id"\s*:\s*")[a-f0-9]{8,}')
 _STRIPE = re.compile(r'\b(?:sk|rk|pk)_(?:live|test)_[0-9A-Za-z]{16,}')
-_DIGITALOCEAN = re.compile(r'\bdo[opr]_v1_[a-f0-9]{64}\b')
+_DIGITALOCEAN = re.compile(r'\bdo[opr]_v1_[a-f0-9]{8,}')
 _AZURE_STORAGE = re.compile(r'(AccountKey=)[A-Za-z0-9+/]{60,}={0,2}', re.IGNORECASE)
 _SLACK_WEBHOOK = re.compile(r'(hooks\.slack\.com/services/)[A-Za-z0-9/]{20,}')
 _DISCORD_WEBHOOK = re.compile(r'(discord(?:app)?\.com/api/webhooks/\d+/)[\w\-]{20,}')
-_TELEGRAM_BOT = re.compile(r'(?:(?<=/bot)|(?<!\w))\d{8,10}:AA[\w\-]{33}\b')
+_TELEGRAM_BOT = re.compile(r'(?:(?<=/bot)|(?<!\w))\d{8,}:AA[\w\-]*')
 # MTProto application credentials and Telethon/Pyrogram session strings. The
 # session string alone is a full account takeover, so it outranks the bot token.
 _TELEGRAM_API_HASH = re.compile(
-    r'((?:api_hash|app_hash|tg_api_hash)\s*[:=]\s*["\']?)[a-f0-9]{32}',
+    r'((?:api_hash|app_hash|tg_api_hash)\s*[:=]\s*["\']?)[a-f0-9]{8,}',
     re.IGNORECASE,
 )
 _TELEGRAM_SESSION = re.compile(
@@ -300,7 +300,7 @@ _RULES = (
     Rule('hash', _HASH, '[REDACTED:hash]'),
     Rule('docker_auth', _DOCKER_AUTH, '\\1[REDACTED:docker_auth]\\2'),
     Rule('k8s_key_data', _K8S_KEY_DATA, '\\1[REDACTED:k8s_key_data]'),
-    Rule('gcp_key_id', _GCP_KEY_ID, '\\1[REDACTED:gcp_key_id]\\2'),
+    Rule('gcp_key_id', _GCP_KEY_ID, '\\1[REDACTED:gcp_key_id]'),
     Rule('azure_storage', _AZURE_STORAGE, '\\1[REDACTED:azure_storage]'),
     Rule('google_api_key', _GOOGLE_API_KEY, '[REDACTED:google_api_key]'),
     Rule('stripe', _STRIPE, '[REDACTED:stripe]'),
@@ -470,6 +470,12 @@ _MUST_CUT = [
     ('jwt', "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.AbCdEf0123456789ghij"),
     ('phone', "call +7 999 123-45-67 now"),
     ('card', "card 4111 1111 1111 1111 on file"),
+    # Cut in half by an upstream truncation. Assembled, never written out.
+    ('telegram_bot', "https://api.telegram.org/" + "bot" + "1234567890:" + "AA" + "Bc3dEfGhIjKlMnOp"),
+    ('google_api_key', "key=" + "AIza" + "SyD9xQv7Lm"),
+    ('digitalocean', "token " + "do" + "p_v1_" + "d0" * 10),
+    ('telegram_api_hash', "api_hash = " + "a1b2c3d4e5f6a7b8"),
+    ('gcp_key_id', '"private_key_id": "' + "a1b2c3d4e5f6a7b8"),
 ]
 
 # Ordinary output that must come back byte-identical under the default rules.
