@@ -6,7 +6,7 @@ writes {"hookSpecificOutput": {...}} to stdout.
 
 Every rule has a name, and every replacement says which rule fired
 ([REDACTED:stripe]), so the name to switch off is visible in the output itself.
-Pick the rules in ~/.claude/redact.toml; `--list-rules` prints them.
+Pick the rules in $CLAUDE_CONFIG_DIR/redact.toml; `--list-rules` prints them.
 
 Run `redact_output.py --self-check` to verify both directions: secrets are cut,
 ordinary code is not.
@@ -361,9 +361,21 @@ def _env_list(name: str) -> set:
     return {part.strip() for part in os.environ.get(name, "").split(",") if part.strip()}
 
 
+def _config_path() -> str:
+    """$CLAUDE_CONFIG_DIR/redact.toml, then the old ~/.claude/redact.toml."""
+    if os.environ.get("REDACT_CONFIG"):
+        return os.environ["REDACT_CONFIG"]
+    default = os.path.expanduser("~/.claude/redact.toml")
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if not config_dir:
+        return default
+    path = os.path.join(os.path.expanduser(config_dir), "redact.toml")
+    return path if os.path.exists(path) else default
+
+
 def load_config() -> dict:
-    """Read ~/.claude/redact.toml. A broken config must never take the hook down."""
-    path = os.environ.get("REDACT_CONFIG") or os.path.expanduser("~/.claude/redact.toml")
+    """A broken config must never take the hook down."""
+    path = _config_path()
     if not os.path.exists(path):
         return {}
     if tomllib is None:

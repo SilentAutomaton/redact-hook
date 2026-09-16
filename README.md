@@ -147,11 +147,12 @@ cd redact-hook && git pull
 install -Dm755 redact_output.py ~/.claude/hooks/redact_output.py
 ```
 
-Restart Claude Code afterwards. Your `~/.claude/redact.toml` is untouched.
+Restart Claude Code afterwards. Your `redact.toml` is untouched.
 
 ## Choosing the rules
 
-Write `~/.claude/redact.toml`. Every field is optional.
+Write `redact.toml` in `$CLAUDE_CONFIG_DIR`, or in `~/.claude` if that
+variable is not set. Every field is optional.
 
 ```toml
 # rules to switch off, by the name in [REDACTED:name]
@@ -185,7 +186,7 @@ These override the file, so a project can set its own rules through the `env` bl
 | `REDACT_DISABLE` | unset | Comma-separated rule names to switch off |
 | `REDACT_ENABLE` | unset | Comma-separated rule names to switch on |
 | `REDACT_SKIP_TOOLS` | `WebFetch,WebSearch` | Tool names to pass through untouched |
-| `REDACT_CONFIG` | `~/.claude/redact.toml` | Config file path |
+| `REDACT_CONFIG` | `$CLAUDE_CONFIG_DIR/redact.toml`, else `~/.claude/redact.toml` | Config file path |
 | `REDACT_AGGRESSIVE` | unset | `1` is an alias for `REDACT_ENABLE=entropy` |
 
 ## Plugin installation (Claude Code skill)
