@@ -166,6 +166,9 @@ variable is not set. Every field is optional.
 # rules to switch off, by the name in [REDACTED:name]
 disable = ["phone", "card"]
 
+# "partial" keeps the head and tail of a whole token: sk_liv...D3fH
+mask = "partial"
+
 # rules to switch on
 enable = ["entropy", "email", "home_path"]
 
@@ -186,6 +189,15 @@ replacement = "[staff]"
 A missing file is fine. Bad TOML, a bad regex or a rule with no `pattern` prints a warning on stderr and the rest keeps working — the hook never dies on a config error, because a dead hook redacts nothing.
 
 A custom `pattern` with an unbounded repeat inside another, such as `(a+)+` or `(\w+\s?)*`, is skipped with a warning too: on the wrong input it backtracks for minutes, and the hook sits in front of every tool result.
+
+### Partial masks
+
+With `mask = "partial"`, a token of 18 characters or more that a rule cuts whole
+comes back as its first 6 and last 4 characters, `sk_liv...D3fH`, so a log line
+still says which key it was. Rules that cut a value behind a key, such as
+`wg_key` or `assignment`, `secret_file`, and a custom rule with its own
+`replacement` keep the placeholder. A partial mask already in the text, written
+by this hook or another tool, is left alone on the next pass.
 
 ### Exact values
 
@@ -211,6 +223,7 @@ These override the file, so a project can set its own rules through the `env` bl
 | `REDACT_ENABLE` | unset | Comma-separated rule names to switch on |
 | `REDACT_SKIP_TOOLS` | `WebFetch,WebSearch,Write,ToolSearch,ExitPlanMode,AskUserQuestion` | Tool names to pass through untouched |
 | `REDACT_CONFIG` | `$CLAUDE_CONFIG_DIR/redact.toml`, else `~/.claude/redact.toml` | Config file path |
+| `REDACT_MASK` | unset | `partial` is the same as `mask = "partial"` |
 | `REDACT_AGGRESSIVE` | unset | `1` is an alias for `REDACT_ENABLE=entropy` |
 
 `entropy` also switches on by itself for one result when the command prints a

@@ -420,23 +420,47 @@ _RULES = (
 _DEFAULT_RULES = tuple(rule for rule in _RULES if rule.on)
 
 
-def _guard(repl, allow):
+def _guard(rule, allow, mask=False):
     """Single place the allowlist applies: an allowed match is left alone."""
     def sub(match: re.Match) -> str:
-        if any(pattern.search(match.group(0)) for pattern in allow):
-            return match.group(0)
-        return repl(match) if callable(repl) else match.expand(repl)
+        whole = match.group(0)
+        if any(pattern.search(whole) for pattern in allow):
+            return whole
+        out = rule.repl(match) if callable(rule.repl) else match.expand(rule.repl)
+        # Partial mode keeps a whole-token match recognisable: sk-pro...WXYZ.
+        # A backreference rule masks a value behind a key and has no token to trim.
+        token = out == f'[REDACTED:{rule.name}]' or (rule.name == 'prefix' and out != whole)
+        if mask and token and len(whole) >= 18 and '\n' not in whole and rule.name != 'secret_file':
+            return f'{whole[:6]}...{whole[-4:]}'
+        return out
     return sub
 
 
-def redact_regex(text: str, rules=None, allow=()) -> str:
+# A partial mask already in the text, ours or another tool's. It is hidden from
+# the rules, so a second pass does not swallow it.
+# ponytail: shape heuristic; a mask whose head holds a space (phone, card) is cut again.
+_MASKED = re.compile(r'(?<![\w.\-])[\w.\-+/$]{2,6}\.\.\.[\w\-+/=]{4}(?![\w\-])')
+_HIDDEN = re.compile(r'\x00RM(\d+)\x00')
+
+
+def redact_regex(text: str, rules=None, allow=(), mask=False) -> str:
     text = _CONTROL_SPLIT.sub('', text)
+    kept = []
+
+    def hide(match: re.Match) -> str:
+        kept.append(match.group(0))
+        return f'\x00RM{len(kept) - 1}\x00'
+
+    if '...' in text:
+        text = _MASKED.sub(hide, text)
     lower = text.lower()
     for rule in _DEFAULT_RULES if rules is None else rules:
         if rule.need and not any(literal in lower for literal in rule.need):
             continue
-        text = rule.pattern.sub(_guard(rule.repl, allow), text)
-    return text
+        text = rule.pattern.sub(_guard(rule, allow, mask), text)
+    if not kept:
+        return text
+    return _HIDDEN.sub(lambda m: kept[int(m.group(1))] if int(m.group(1)) < len(kept) else m.group(0), text)
 
 
 def _env_list(name: str) -> set:
@@ -740,6 +764,18 @@ _COMMANDS = [
     ("git config --unset user.name", False),
 ]
 
+# Default and partial output for one whole-match rule and for prefix. Assembled,
+# never written out.
+_STRIPE_SAMPLE = "sk_" + "live_" + "Xk7pQ2mZr9TvB4nLs6WyD3fH"
+_GHP_SAMPLE = "ghp_" + "16C7e42F292c6912E7710c838347Ae178B4a"
+_MASK = [
+    ("charge with " + _STRIPE_SAMPLE, "charge with [REDACTED:stripe]", "charge with sk_liv...D3fH"),
+    ("pushed with " + _GHP_SAMPLE, "pushed with ghp_[REDACTED:prefix]", "pushed with ghp_16...8B4a"),
+    ("wg PrivateKey = " + "A" * 43 + "=", "wg PrivateKey = [REDACTED:wg_key]", "wg PrivateKey = [REDACTED:wg_key]"),
+]
+# Masks another tool wrote must survive a pass.
+_MASK_KEEP = ["key sk-pro...WXYZ", "key sk-pro...1234 in log", "token: ghp_ab...9f3c"]
+
 _NESTED = [
     (r'(a+)+', True),
     (r'(\w+\s?)*', True),
@@ -792,6 +828,15 @@ def self_check() -> int:
     for command, dump in _COMMANDS:
         if _dumps_env(command) != dump:
             bad.append(f"env dump check wrong on {command!r}")
+    for sample, full, partial in _MASK:
+        if redact_regex(sample) != full or redact_regex(sample, mask=True) != partial:
+            bad.append(f"mask mode wrong on {sample!r}")
+        for mask in (False, True):
+            if redact_regex(partial, mask=mask) != partial:
+                bad.append(f"partial mask not stable: {partial!r}")
+    for sample in _MASK_KEEP:
+        if redact_regex(sample) != sample:
+            bad.append(f"partial mask swallowed: {sample!r}")
     for shape in _SHAPES:
         out = _redact_tree(shape, redact_regex)
         if not _same_shape(shape, out) or _LEAK[9:] in json.dumps(out):
@@ -822,7 +867,8 @@ def main() -> None:
     exact = exact_rule(load_secrets())
     if exact:
         rules = (exact,) + rules
-    updated = _redact_tree(data.get("tool_response", ""), lambda text: redact_regex(text, rules, allow))
+    mask = (os.environ.get("REDACT_MASK") or config.get("mask", "")) == "partial"
+    updated = _redact_tree(data.get("tool_response", ""), lambda text: redact_regex(text, rules, allow, mask))
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "updatedToolOutput": updated}}))
 
 
