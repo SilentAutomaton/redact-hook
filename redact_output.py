@@ -418,30 +418,20 @@ def allow_patterns(config: dict) -> tuple:
     return tuple(out)
 
 
-def build_updated_response(data: dict, redacted: str) -> object:
-    """Reconstruct tool_response with redacted content. CC validates against tool outputSchema."""
-    resp = data.get("tool_response")
-    if isinstance(resp, dict):
-        # Read tool: {"type": "text", "file": {"content": "...", ...}}
-        if "file" in resp and isinstance(resp["file"], dict):
-            import copy
-            updated = copy.deepcopy(resp)
-            updated["file"]["content"] = redacted
-            lines = redacted.splitlines()
-            updated["file"]["numLines"] = len(lines) + 1
-            updated["file"]["totalLines"] = len(lines) + 1
-            return updated
-        # Bash tool: {"stdout": "...", "stderr": "...", ...}
-        if "stdout" in resp:
-            import copy
-            updated = copy.deepcopy(resp)
-            updated["stdout"] = redacted
-            return updated
-    # fallback: plain string (MCP tools, older CC versions)
-    return redacted
+def _redact_tree(value, redact):
+    """Redact every string leaf and keep the shape: CC checks it against the tool's schema."""
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, dict):
+        return {k: v if k == "base64" else _redact_tree(v, redact) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_tree(v, redact) for v in value]
+    return value
 
 
-_SKIP_TOOLS = frozenset(os.environ.get("REDACT_SKIP_TOOLS", "WebFetch,WebSearch").split(","))
+# These return only what the model or the user wrote, so nothing new reaches the model.
+_SKIP_DEFAULT = "WebFetch,WebSearch,Write,ToolSearch,ExitPlanMode,AskUserQuestion"
+_SKIP_TOOLS = frozenset(os.environ.get("REDACT_SKIP_TOOLS", _SKIP_DEFAULT).split(","))
 
 # One sample per default rule. Every value here is invented.
 _MUST_CUT = [
@@ -553,6 +543,27 @@ _RULE_KEEP = {
 }
 
 
+# One tool_response per shape Claude Code sends. Each must come back with the
+# same keys and types, and without the secret.
+_LEAK = "password=" + "Xk7pQ2mZr9Tv"
+_SHAPES = [
+    {"type": "text", "file": {"filePath": "/x/.env", "content": _LEAK, "numLines": 1, "totalLines": 1}},
+    {"stdout": _LEAK, "stderr": "", "interrupted": False, "isImage": False},
+    {"filePath": "/x/app.py", "oldString": "a", "newString": "b", "originalFile": _LEAK,
+     "structuredPatch": [{"oldStart": 1, "lines": ["-a", "+" + _LEAK]}], "userModified": False},
+    [{"type": "text", "text": _LEAK}],
+    _LEAK,
+]
+
+
+def _same_shape(a, b) -> bool:
+    if isinstance(a, dict):
+        return isinstance(b, dict) and a.keys() == b.keys() and all(_same_shape(a[k], b[k]) for k in a)
+    if isinstance(a, list):
+        return isinstance(b, list) and len(a) == len(b) and all(map(_same_shape, a, b))
+    return type(a) is type(b)
+
+
 def self_check() -> int:
     bad = []
     for name, sample in _MUST_CUT:
@@ -577,6 +588,10 @@ def self_check() -> int:
             out = redact_regex(sample, rules)
             if out != sample:
                 bad.append(f"{name} mangled: {sample!r} -> {out!r}")
+    for shape in _SHAPES:
+        out = _redact_tree(shape, redact_regex)
+        if not _same_shape(shape, out) or _LEAK[9:] in json.dumps(out):
+            bad.append(f"response shape broken or not redacted: {json.dumps(out)[:80]}")
 
     for line in bad:
         print(line)
@@ -594,23 +609,11 @@ def list_rules() -> int:
 
 def main() -> None:
     data = json.load(sys.stdin)
-    resp = data.get("tool_response", "")
     if data.get("tool_name") in _SKIP_TOOLS:
-        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "updatedToolOutput": resp}}))
         return
     config = load_config()
-
-    if isinstance(resp, dict):
-        if "file" in resp and isinstance(resp.get("file"), dict):
-            raw = resp["file"].get("content", "")
-        else:
-            raw = "\n".join(str(resp.get(k, "")) for k in ("stdout", "stderr") if resp.get(k))
-    elif isinstance(resp, list):
-        raw = json.dumps(resp)
-    else:
-        raw = str(resp)
-    redacted = redact_regex(raw, active_rules(config), allow_patterns(config))
-    updated = build_updated_response(data, redacted)
+    rules, allow = active_rules(config), allow_patterns(config)
+    updated = _redact_tree(data.get("tool_response", ""), lambda text: redact_regex(text, rules, allow))
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "updatedToolOutput": updated}}))
 
 

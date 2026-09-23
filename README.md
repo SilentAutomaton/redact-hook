@@ -127,7 +127,9 @@ Write the path in full. Claude Code does not expand `~` or `$HOME` in a hook
 
 `"matcher": ".*"` runs the hook after every tool. To leave a tool alone, name it
 in `REDACT_SKIP_TOOLS` rather than narrowing the matcher — the default already
-skips `WebFetch` and `WebSearch`, whose output is public anyway.
+skips `WebFetch` and `WebSearch`, whose output is public anyway, and `Write`,
+`ToolSearch`, `ExitPlanMode` and `AskUserQuestion`, whose output holds only what
+the model or you wrote.
 
 ### 3. Restart Claude Code
 
@@ -185,7 +187,7 @@ These override the file, so a project can set its own rules through the `env` bl
 |---|---|---|
 | `REDACT_DISABLE` | unset | Comma-separated rule names to switch off |
 | `REDACT_ENABLE` | unset | Comma-separated rule names to switch on |
-| `REDACT_SKIP_TOOLS` | `WebFetch,WebSearch` | Tool names to pass through untouched |
+| `REDACT_SKIP_TOOLS` | `WebFetch,WebSearch,Write,ToolSearch,ExitPlanMode,AskUserQuestion` | Tool names to pass through untouched |
 | `REDACT_CONFIG` | `$CLAUDE_CONFIG_DIR/redact.toml`, else `~/.claude/redact.toml` | Config file path |
 | `REDACT_AGGRESSIVE` | unset | `1` is an alias for `REDACT_ENABLE=entropy` |
 
