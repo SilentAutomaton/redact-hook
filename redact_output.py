@@ -218,6 +218,14 @@ _ENTROPY_SKIP = re.compile(
     re.IGNORECASE,
 )
 
+# Terminal escapes and a lone \r inside a token: grep --color, progress output.
+# Only the ones between two token characters go, so colour around words stays.
+_CONTROL_SPLIT = re.compile(
+    r'(?<=[\w.\-+/=])'
+    r'(?:\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\r(?!\n))+'
+    r'(?=[\w.\-+/=])'
+)
+
 
 def _random_enough(value: str) -> bool:
     """A secret is long or has digits. `re.compile` and `npm_check.py` are neither."""
@@ -358,6 +366,7 @@ def _guard(repl, allow):
 
 
 def redact_regex(text: str, rules=None, allow=()) -> str:
+    text = _CONTROL_SPLIT.sub('', text)
     lower = text.lower()
     for rule in _DEFAULT_RULES if rules is None else rules:
         if rule.need and not any(literal in lower for literal in rule.need):
@@ -539,8 +548,17 @@ _MUST_CUT = [
     ('gcp_key_id', '"private_key_id": "' + "a1b2c3d4e5f6a7b8"),
 ]
 
+# Split by terminal escapes, as grep --color and progress output leave them.
+_MUST_CUT += [
+    ('prefix', "ghp_" + "Ab12" + "\x1b[1m" + "Cd34Ef56Gh78"),
+    ('env_secret', "DB_" + "\x1b[01;31m\x1b[K" + "PASS" + "\x1b[m\x1b[K" + "=Xk7pQ2mZr9Tv"),
+    ('prefix', "ghp_" + "Ab12" + "\r" + "Cd34Ef56Gh78"),
+]
+
 # Ordinary output that must come back byte-identical under the default rules.
 _MUST_KEEP = [
+    "\x1b[32mOK\x1b[0m done\r\n",
+    "50%\r60%\r100%",
     "_DOCKER_AUTH = re.compile(r'x')",
     "config = {'key': 'value', 'token': 'placeholder'}",
     "auth: enabled\ntoken: ${GITHUB_TOKEN}",

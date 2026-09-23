@@ -77,6 +77,8 @@ Pure regex. No network call, no model, no dependencies — one file and the stan
 | `phone_loose` | phone numbers with no country code | **off** |
 | `entropy` | assignment values with Shannon entropy ≥ 3.5 | **off** |
 
+A terminal escape or a lone `\r` inside a token, as `grep --color` and progress output leave them, is removed before the rules run, so a split key is still cut. Colour around whole words is kept.
+
 The rules are tuned against false positives, and the self-check enforces it: `re.compile(...)`, `PASSWORD = os.environ.get('X')`, `PUBLIC_KEY=ssh-ed25519`, `${GITHUB_TOKEN}`, git SHAs, UUIDs, `sha256:` digests and Go `h1:` hashes all come back byte-identical.
 
 The eight off-by-default rules are off because cutting mail addresses, home paths and IP addresses breaks ordinary work with `git log`, stack traces and `ip addr`. `public_ip6` is off for the same reason as `public_ip`: switch it on with `enable = ["public_ip6"]` when a transcript must not carry your server addresses. Entropy is off because it misses about a third of real secrets and invents false positives; the named rules do the real work.
