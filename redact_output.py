@@ -59,12 +59,29 @@ _DOCKER_AUTH = re.compile(r'("auth"\s*:\s*")[A-Za-z0-9+/]{20,}={0,2}(")')
 
 # Separator must be a real = or : on the same line. A bare space used to join a
 # keyword to whatever followed it on the next line.
+_SECRET_KEYS = (
+    r'password|passwd|secret|api_key|apikey|access_key|private_key|privatekey'
+    r'|presharedkey|auth_key|auth_token|access_token|client_secret|token|psk|bearer'
+)
 _ASSIGNMENT = re.compile(
     r'(?<![A-Za-z])'
-    r'(password|passwd|secret|api_key|apikey|access_key|private_key|privatekey'
-    r'|presharedkey|auth_key|auth_token|access_token|client_secret|token|psk|bearer)'
+    r'(' + _SECRET_KEYS + r')'
     r'[ \t]*[:=][ \t]*'
     r'["\']?([A-Za-z0-9._\-/+]{6,})["\']?(?!\s*\()',
+    re.IGNORECASE,
+)
+
+# Python reprs, dict literals and JSON: a quoted value after a secret key. Any
+# character but the quote counts, which the assignment rule's value class misses.
+_PY_REPR = re.compile(
+    r'(?<![A-Za-z])(?P<q>[\'"]?)(?:' + _SECRET_KEYS + r')(?P=q)[ \t]*[:=][ \t]*'
+    r'(?P<q2>[\'"])(?P<v>(?:(?!(?P=q2))[^\n\\]){4,200})(?P=q2)',
+    re.IGNORECASE,
+)
+# pytest's "+  where 'value' = settings.password" names the value's source.
+_PYTEST_WHERE = re.compile(
+    r'(\bwhere\s+)([\'"])((?:(?!\2)[^\n\\]){4,200})\2'
+    r'(\s*=\s*[\w.()\[\]\'"]*?(?:' + _SECRET_KEYS + r')\b)',
     re.IGNORECASE,
 )
 
@@ -295,6 +312,21 @@ def _redact_pw_command(match: re.Match) -> str:
     return f'{match.group(1)}{match.group(2)}[REDACTED:pw_command]{match.group(4)}'
 
 
+def _redact_repr(match: re.Match) -> str:
+    value = match.group('v')
+    if value[0] in '${<%' or not _random_enough(value):  # ${VAR}, {{ tpl }}, <placeholder>, %s
+        return match.group(0)
+    head = match.group(0)[:match.start('v') - match.start()]
+    return f"{head}[REDACTED:py_repr]{match.group('q2')}"
+
+
+def _redact_where(match: re.Match) -> str:
+    if not _random_enough(match.group(3)):
+        return match.group(0)
+    quote = match.group(2)
+    return f'{match.group(1)}{quote}[REDACTED:pytest_where]{quote}{match.group(4)}'
+
+
 def _keyed(name: str) -> Callable[[re.Match], str]:
     """Assignment-shaped rules: cut the value only when it looks random."""
     def repl(match: re.Match) -> str:
@@ -352,6 +384,8 @@ _RULES = (
     Rule('secret_word', _SECRET_WORD, _keyed('secret_word'), need=('passphrase', 'credentials')),
     # ponytail: assignment before prefix — avoids double-[REDACTED] when both match same value
     Rule('assignment', _ASSIGNMENT, _keyed('assignment')),
+    Rule('py_repr', _PY_REPR, _redact_repr),
+    Rule('pytest_where', _PYTEST_WHERE, _redact_where, need=('where',)),
     Rule('prefix', _PREFIX, _prefixed),
     Rule('conn_str', _CONN_STR, '\\1[REDACTED:conn_str]@', need=('://',)),
     Rule('jwt', _JWT, '[REDACTED:jwt]', need=('eyj',)),
@@ -571,6 +605,13 @@ _MUST_CUT += [
     ('query_param', "s3.amazonaws.com/f?X-Amz-Signature=" + "0a1b2c3d4e5f"),
 ]
 
+_MUST_CUT += [
+    ('py_repr', "Config(api_key='" + "p@ss!w0rd#2x" + "', debug=True)"),
+    ('py_repr', "{'client_secret': '" + "a1b2 c3d4 e5f6" + "', 'id': 7}"),
+    ('py_repr', '{"token": "' + "Zm9v!YmFy#9" + '"}'),
+    ('pytest_where', "E       +  where '" + "hunter2abc9" + "' = settings.password"),
+]
+
 # Split by terminal escapes, as grep --color and progress output leave them.
 _MUST_CUT += [
     ('prefix', "ghp_" + "Ab12" + "\x1b[1m" + "Cd34Ef56Gh78"),
@@ -582,6 +623,10 @@ _MUST_CUT += [
 _MUST_KEEP = [
     "\x1b[32mOK\x1b[0m done\r\n",
     "50%\r60%\r100%",
+    "E       assert 'expected' == 'actual'",
+    "E       +  where 'Alice' = user.name",
+    '{"password": "${DB_PASSWORD}", "token": "string"}',
+    "password: '{{ vault_db_password }}'",
     "GET /search?q=hello&page=2&sort=desc",
     'url = f"{base}?token={token}"',
     "https://example.com/?ref=newsletter",

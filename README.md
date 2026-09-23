@@ -63,6 +63,8 @@ Pure regex. No network call, no model, no dependencies — one file and the stan
 | `env_secret` | `UPPER_SNAKE` names ending `_PASS`, `_PWD`, `_SECRET`, `_TOKEN`, `_KEY`, `_DSN`, `_PAT` … plus `PGPASSWORD`, `MYSQL_PWD` | on |
 | `secret_word` | `passphrase=`, `credentials=` in any case | on |
 | `assignment` | `password=`, `api_key=`, `client_secret=`, `access_token=` … | on |
+| `py_repr` | a quoted value after a secret key in a Python repr, a dict literal or JSON: `Config(api_key='…')`, `{'password': '…'}`, any characters inside the quotes | on |
+| `pytest_where` | the value in pytest's `where '…' = settings.password` | on |
 | `prefix` | `ghp_`, `sk-`, `AKIA`, `glpat-`, `SG.`, `npm_`, `hvs.`, `Bearer `, `dckr_pat_`, `xoxb-`, `pypi-`, `whsec_` | on |
 | `conn_str` | the password in any `scheme://user:pass@host` | on |
 | `jwt` | `eyJ…eyJ…` | on |
