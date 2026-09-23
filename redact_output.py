@@ -21,6 +21,11 @@ try:
 except ImportError:  # config file needs Python 3.11
     tomllib = None
 
+try:
+    from re import _parser as _sre
+except ImportError:  # Python < 3.11
+    import sre_parse as _sre
+
 _PREFIX = re.compile(
     r'(dckr_pat_|tok_|sk-|ghp_|gho_|github_pat_|AKIA|hf_|xoxb-|xoxp-|Bearer\s+'
     r'|SG\.'           # SendGrid
@@ -393,6 +398,23 @@ def load_config() -> dict:
         return {}
 
 
+def _nested_repeat(items, inside=False) -> bool:
+    """(a+)+ and its kin: an unbounded repeat inside another backtracks exponentially."""
+    for op, av in items:
+        if op in (_sre.MAX_REPEAT, _sre.MIN_REPEAT):
+            unbounded = av[1] == _sre.MAXREPEAT
+            if unbounded and inside:
+                return True
+            if _nested_repeat(av[2], inside or unbounded):
+                return True
+            continue
+        for child in av if isinstance(av, (tuple, list)) else ():
+            subs = child if isinstance(child, list) else [child]
+            if any(isinstance(sub, _sre.SubPattern) and _nested_repeat(sub, inside) for sub in subs):
+                return True
+    return False
+
+
 def active_rules(config: dict) -> tuple:
     off = set(config.get("disable", [])) | _env_list("REDACT_DISABLE")
     on = set(config.get("enable", [])) | _env_list("REDACT_ENABLE")
@@ -407,6 +429,10 @@ def active_rules(config: dict) -> tuple:
             pattern = re.compile(spec["pattern"])
         except (KeyError, re.error) as exc:
             print(f"redact: skipping rule {name!r}: {exc}", file=sys.stderr)
+            continue
+        if _nested_repeat(_sre.parse(spec["pattern"])):
+            print(f"redact: skipping rule {name!r}: nested unbounded repeat can hang the hook",
+                  file=sys.stderr)
             continue
         rules.append(Rule(name, pattern, spec.get("replacement", f"[REDACTED:{name}]")))
     return tuple(rules)
@@ -559,6 +585,15 @@ _SHAPES = [
     _LEAK,
 ]
 
+_NESTED = [
+    (r'(a+)+', True),
+    (r'(\w+\s?)*', True),
+    (r'(?:x|(y*))+z', True),
+    (r'ACME-\d{6}', False),
+    (r'(ab)+c*', False),
+    (r'(\d{2,5}-)+', False),
+]
+
 
 def _same_shape(a, b) -> bool:
     if isinstance(a, dict):
@@ -592,6 +627,9 @@ def self_check() -> int:
             out = redact_regex(sample, rules)
             if out != sample:
                 bad.append(f"{name} mangled: {sample!r} -> {out!r}")
+    for expr, nested in _NESTED:
+        if _nested_repeat(_sre.parse(expr)) != nested:
+            bad.append(f"nested repeat check wrong on {expr!r}")
     for shape in _SHAPES:
         out = _redact_tree(shape, redact_regex)
         if not _same_shape(shape, out) or _LEAK[9:] in json.dumps(out):

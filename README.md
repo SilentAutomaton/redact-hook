@@ -179,6 +179,8 @@ replacement = "[staff]"
 
 A missing file is fine. Bad TOML, a bad regex or a rule with no `pattern` prints a warning on stderr and the rest keeps working — the hook never dies on a config error, because a dead hook redacts nothing.
 
+A custom `pattern` with an unbounded repeat inside another, such as `(a+)+` or `(\w+\s?)*`, is skipped with a warning too: on the wrong input it backtracks for minutes, and the hook sits in front of every tool result.
+
 ### Environment variables
 
 These override the file, so a project can set its own rules through the `env` block of its `.claude/settings.json` without a second config file.
