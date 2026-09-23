@@ -142,6 +142,21 @@ _NETRC = re.compile(
     re.IGNORECASE,
 )
 
+# Credentials by parameter name in a query string or a urlencoded body. Case and
+# the separators -, _ and . are folded, so accessToken, access-token and
+# ACCESS.TOKEN are one name.
+_QUERY_NAMES = (
+    'access_token', 'refresh_token', 'id_token', 'auth_token', 'token', 'api_key',
+    'apikey', 'client_secret', 'secret', 'password', 'passwd', 'pwd', 'signature',
+    'sig', 'code', 'x_amz_signature', 'x_amz_security_token', 'x_amz_credential',
+    'x_goog_signature',
+)
+_QUERY_PARAM = re.compile(
+    r'([?&;](?:' + '|'.join(name.replace('_', '[-_.]?') for name in _QUERY_NAMES) + r')=)'
+    r'[^&#\s"\'<>{}$]{4,}',
+    re.IGNORECASE,
+)
+
 # A password handed straight to a password-setting command. Anchored to the
 # command name: a quoted string on its own is prose.
 _PW_COMMAND = re.compile(
@@ -330,6 +345,7 @@ _RULES = (
     Rule('netrc', _NETRC, '\\1[REDACTED:netrc]', need=('machine',)),
     Rule('cli_userpass', _CLI_USERPASS, '\\1[REDACTED:cli_userpass]', need=('-u', '--user')),
     Rule('cli_password', _CLI_PASSWORD, '\\1[REDACTED:cli_password]', need=('--',)),
+    Rule('query_param', _QUERY_PARAM, '\\1[REDACTED:query_param]'),
     Rule('pw_command', _PW_COMMAND, _redact_pw_command, need=('wgpw', 'passwd')),
     Rule('bip39_seed', _BIP39_SEED, '\\1[REDACTED:bip39_seed]', need=('mnemonic', 'seed', 'recovery')),
     Rule('env_secret', _ENV_SECRET, _keyed('env_secret')),
@@ -548,6 +564,13 @@ _MUST_CUT = [
     ('gcp_key_id', '"private_key_id": "' + "a1b2c3d4e5f6a7b8"),
 ]
 
+_MUST_CUT += [
+    ('query_param', "GET /cb?state=xyz&code=" + "4f9a1c2e7b"),
+    ('query_param', "https://api.example.com/v1/items?accessToken=" + "Qm9vazEyMzQ1"),
+    ('query_param', "grant_type=refresh&client-secret=" + "hunter22abc"),
+    ('query_param', "s3.amazonaws.com/f?X-Amz-Signature=" + "0a1b2c3d4e5f"),
+]
+
 # Split by terminal escapes, as grep --color and progress output leave them.
 _MUST_CUT += [
     ('prefix', "ghp_" + "Ab12" + "\x1b[1m" + "Cd34Ef56Gh78"),
@@ -559,6 +582,10 @@ _MUST_CUT += [
 _MUST_KEEP = [
     "\x1b[32mOK\x1b[0m done\r\n",
     "50%\r60%\r100%",
+    "GET /search?q=hello&page=2&sort=desc",
+    'url = f"{base}?token={token}"',
+    "https://example.com/?ref=newsletter",
+    "curl -s 'https://api.example.com/?token=$TOKEN'",
     "_DOCKER_AUTH = re.compile(r'x')",
     "config = {'key': 'value', 'token': 'placeholder'}",
     "auth: enabled\ntoken: ${GITHUB_TOKEN}",

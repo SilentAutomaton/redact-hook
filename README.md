@@ -57,6 +57,7 @@ Pure regex. No network call, no model, no dependencies — one file and the stan
 | `netrc` | `password` in a `machine …` line | on |
 | `cli_userpass` | `curl -u user:pass` | on |
 | `cli_password` | `--password=`, `--token=`, `--api-key=` | on |
+| `query_param` | `?access_token=`, `&client_secret=`, `X-Amz-Signature=`, `code=` … in a URL or a urlencoded body; case, `-`, `_` and `.` in the name do not matter | on |
 | `pw_command` | the literal password given to `wgpw`, `htpasswd`, `chpasswd`, `smbpasswd`, `mkpasswd`, `openssl passwd` | on |
 | `bip39_seed` | 12–24 word wallet seed after `mnemonic`/`seed`/`recovery phrase` | on |
 | `env_secret` | `UPPER_SNAKE` names ending `_PASS`, `_PWD`, `_SECRET`, `_TOKEN`, `_KEY`, `_DSN`, `_PAT` … plus `PGPASSWORD`, `MYSQL_PWD` | on |
