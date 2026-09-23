@@ -32,6 +32,7 @@ Pure regex. No network call, no model, no dependencies — one file and the stan
 
 | Rule | Cuts | Default |
 |---|---|---|
+| `secret_file` | the exact values in `redact.secrets`, when that file exists | on |
 | `ssh_key` | `-----BEGIN … PRIVATE KEY-----` blocks, including PGP armour | on |
 | `putty_ppk` | PuTTY `Private-Lines:` body | on |
 | `awg_init` | AmneziaWG `I1 = <b 0x…>` fake TLS blobs | on |
@@ -180,6 +181,20 @@ replacement = "[staff]"
 A missing file is fine. Bad TOML, a bad regex or a rule with no `pattern` prints a warning on stderr and the rest keeps working — the hook never dies on a config error, because a dead hook redacts nothing.
 
 A custom `pattern` with an unbounded repeat inside another, such as `(a+)+` or `(\w+\s?)*`, is skipped with a warning too: on the wrong input it backtracks for minutes, and the hook sits in front of every tool result.
+
+### Exact values
+
+No pattern can tell an ordinary password from an ordinary word. For those, put
+the exact values in `redact.secrets` next to `redact.toml`, one per line:
+
+```bash
+install -m600 /dev/null ~/.claude/redact.secrets
+$EDITOR ~/.claude/redact.secrets
+```
+
+Every value is matched literally, the longest first, and comes back as
+`[REDACTED:secret_file]`. Values shorter than 4 characters are skipped. The hook
+warns if the file is readable by other users and never prints a value.
 
 ### Environment variables
 

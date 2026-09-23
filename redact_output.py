@@ -370,16 +370,45 @@ def _env_list(name: str) -> set:
     return {part.strip() for part in os.environ.get(name, "").split(",") if part.strip()}
 
 
-def _config_path() -> str:
-    """$CLAUDE_CONFIG_DIR/redact.toml, then the old ~/.claude/redact.toml."""
-    if os.environ.get("REDACT_CONFIG"):
-        return os.environ["REDACT_CONFIG"]
-    default = os.path.expanduser("~/.claude/redact.toml")
+def _config_file(name: str) -> str:
+    """$CLAUDE_CONFIG_DIR/<name>, then the old ~/.claude/<name>."""
+    default = os.path.expanduser(os.path.join("~/.claude", name))
     config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
     if not config_dir:
         return default
-    path = os.path.join(os.path.expanduser(config_dir), "redact.toml")
+    path = os.path.join(os.path.expanduser(config_dir), name)
     return path if os.path.exists(path) else default
+
+
+def _config_path() -> str:
+    return os.environ.get("REDACT_CONFIG") or _config_file("redact.toml")
+
+
+def load_secrets() -> list:
+    """redact.secrets: exact values, one per line. A value is never printed."""
+    path = _config_file("redact.secrets")
+    try:
+        if os.stat(path).st_mode & 0o077:
+            print(f"redact: {path} is readable by other users, chmod 600 it", file=sys.stderr)
+        with open(path, encoding="utf-8") as handle:
+            lines = [line.rstrip("\r") for line in handle.read().split("\n")]
+    except FileNotFoundError:
+        return []
+    except (OSError, UnicodeDecodeError) as exc:
+        print(f"redact: cannot read {path}: {type(exc).__name__}", file=sys.stderr)
+        return []
+    short = sum(1 for line in lines if 0 < len(line) < 4)
+    if short:
+        print(f"redact: skipping {short} value(s) shorter than 4 characters in {path}", file=sys.stderr)
+    return [line for line in lines if len(line) >= 4]
+
+
+def exact_rule(values):
+    """Longest first, so a value that contains another is cut whole."""
+    values = sorted(set(values), key=len, reverse=True)
+    if not values:
+        return None
+    return Rule('secret_file', re.compile("|".join(map(re.escape, values))), '[REDACTED:secret_file]')
 
 
 def load_config() -> dict:
@@ -585,6 +614,13 @@ _SHAPES = [
     _LEAK,
 ]
 
+# Exact values from redact.secrets, matched literally, the longest first.
+_EXACT = [
+    ("login Tr0ub4dor&3 extra ok", "login [REDACTED:secret_file] ok"),
+    ("pw=Tr0ub4dor&3;", "pw=[REDACTED:secret_file];"),
+    ("Tr0ub4dor 3 is not it", "Tr0ub4dor 3 is not it"),
+]
+
 _NESTED = [
     (r'(a+)+', True),
     (r'(\w+\s?)*', True),
@@ -630,6 +666,10 @@ def self_check() -> int:
     for expr, nested in _NESTED:
         if _nested_repeat(_sre.parse(expr)) != nested:
             bad.append(f"nested repeat check wrong on {expr!r}")
+    exact = (exact_rule(["Tr0ub4dor&3", "Tr0ub4dor&3 extra", "p4ss"]),)
+    for sample, want in _EXACT:
+        if redact_regex(sample, exact) != want:
+            bad.append(f"secret_file wrong on {sample!r}")
     for shape in _SHAPES:
         out = _redact_tree(shape, redact_regex)
         if not _same_shape(shape, out) or _LEAK[9:] in json.dumps(out):
@@ -655,6 +695,9 @@ def main() -> None:
         return
     config = load_config()
     rules, allow = active_rules(config), allow_patterns(config)
+    exact = exact_rule(load_secrets())
+    if exact:
+        rules = (exact,) + rules
     updated = _redact_tree(data.get("tool_response", ""), lambda text: redact_regex(text, rules, allow))
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "updatedToolOutput": updated}}))
 
