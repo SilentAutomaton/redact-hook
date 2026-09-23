@@ -287,45 +287,46 @@ class Rule(NamedTuple):
     pattern: re.Pattern
     repl: object          # replacement template, or a callable taking the match
     on: bool = True       # part of the default set
+    need: tuple = ()      # lowercase literals; with none of them in the text the rule is skipped
 
 
 # Order matters. Structural and vendor rules run before the generic assignment
 # and prefix rules, so the placeholder names the most specific rule that fits.
 _RULES = (
-    Rule('ssh_key', _SSH_KEY, '[REDACTED:ssh_key]'),
-    Rule('putty_ppk', _PUTTY_PPK, '\\1[REDACTED:putty_ppk]\n'),
-    Rule('awg_init', _AWG_INIT, '[REDACTED:awg_init]'),
+    Rule('ssh_key', _SSH_KEY, '[REDACTED:ssh_key]', need=('private key',)),
+    Rule('putty_ppk', _PUTTY_PPK, '\\1[REDACTED:putty_ppk]\n', need=('private-lines',)),
+    Rule('awg_init', _AWG_INIT, '[REDACTED:awg_init]', need=('<b',)),
     Rule('awg_params', _AWG_PARAMS, '\\1\\2[REDACTED:awg_params]'),
-    Rule('wg_key', _WG_KEY, '\\1[REDACTED:wg_key]'),
-    Rule('hash', _HASH, '[REDACTED:hash]'),
-    Rule('docker_auth', _DOCKER_AUTH, '\\1[REDACTED:docker_auth]\\2'),
-    Rule('k8s_key_data', _K8S_KEY_DATA, '\\1[REDACTED:k8s_key_data]'),
-    Rule('gcp_key_id', _GCP_KEY_ID, '\\1[REDACTED:gcp_key_id]'),
-    Rule('azure_storage', _AZURE_STORAGE, '\\1[REDACTED:azure_storage]'),
-    Rule('google_api_key', _GOOGLE_API_KEY, '[REDACTED:google_api_key]'),
-    Rule('stripe', _STRIPE, '[REDACTED:stripe]'),
-    Rule('digitalocean', _DIGITALOCEAN, '[REDACTED:digitalocean]'),
-    Rule('telegram_bot', _TELEGRAM_BOT, '[REDACTED:telegram_bot]'),
-    Rule('telegram_session', _TELEGRAM_SESSION, '\\1[REDACTED:telegram_session]'),
-    Rule('telegram_api_hash', _TELEGRAM_API_HASH, '\\1[REDACTED:telegram_api_hash]'),
-    Rule('slack_webhook', _SLACK_WEBHOOK, '\\1[REDACTED:slack_webhook]'),
-    Rule('discord_webhook', _DISCORD_WEBHOOK, '\\1[REDACTED:discord_webhook]'),
-    Rule('basic_auth', _BASIC_AUTH, '\\1[REDACTED:basic_auth]'),
+    Rule('wg_key', _WG_KEY, '\\1[REDACTED:wg_key]', need=('key',)),
+    Rule('hash', _HASH, '[REDACTED:hash]', need=('$',)),
+    Rule('docker_auth', _DOCKER_AUTH, '\\1[REDACTED:docker_auth]\\2', need=('"auth"',)),
+    Rule('k8s_key_data', _K8S_KEY_DATA, '\\1[REDACTED:k8s_key_data]', need=('-data',)),
+    Rule('gcp_key_id', _GCP_KEY_ID, '\\1[REDACTED:gcp_key_id]', need=('private_key_id',)),
+    Rule('azure_storage', _AZURE_STORAGE, '\\1[REDACTED:azure_storage]', need=('accountkey=',)),
+    Rule('google_api_key', _GOOGLE_API_KEY, '[REDACTED:google_api_key]', need=('aiza',)),
+    Rule('stripe', _STRIPE, '[REDACTED:stripe]', need=('_live_', '_test_')),
+    Rule('digitalocean', _DIGITALOCEAN, '[REDACTED:digitalocean]', need=('_v1_',)),
+    Rule('telegram_bot', _TELEGRAM_BOT, '[REDACTED:telegram_bot]', need=(':aa',)),
+    Rule('telegram_session', _TELEGRAM_SESSION, '\\1[REDACTED:telegram_session]', need=('session',)),
+    Rule('telegram_api_hash', _TELEGRAM_API_HASH, '\\1[REDACTED:telegram_api_hash]', need=('_hash',)),
+    Rule('slack_webhook', _SLACK_WEBHOOK, '\\1[REDACTED:slack_webhook]', need=('hooks.slack.com',)),
+    Rule('discord_webhook', _DISCORD_WEBHOOK, '\\1[REDACTED:discord_webhook]', need=('/api/webhooks/',)),
+    Rule('basic_auth', _BASIC_AUTH, '\\1[REDACTED:basic_auth]', need=('basic',)),
     Rule('auth_header', _AUTH_HEADER, '\\1[REDACTED:auth_header]'),
-    Rule('cookie', _COOKIE, '\\1[REDACTED:cookie]'),
-    Rule('netrc', _NETRC, '\\1[REDACTED:netrc]'),
-    Rule('cli_userpass', _CLI_USERPASS, '\\1[REDACTED:cli_userpass]'),
-    Rule('cli_password', _CLI_PASSWORD, '\\1[REDACTED:cli_password]'),
-    Rule('pw_command', _PW_COMMAND, _redact_pw_command),
-    Rule('bip39_seed', _BIP39_SEED, '\\1[REDACTED:bip39_seed]'),
+    Rule('cookie', _COOKIE, '\\1[REDACTED:cookie]', need=('cookie',)),
+    Rule('netrc', _NETRC, '\\1[REDACTED:netrc]', need=('machine',)),
+    Rule('cli_userpass', _CLI_USERPASS, '\\1[REDACTED:cli_userpass]', need=('-u', '--user')),
+    Rule('cli_password', _CLI_PASSWORD, '\\1[REDACTED:cli_password]', need=('--',)),
+    Rule('pw_command', _PW_COMMAND, _redact_pw_command, need=('wgpw', 'passwd')),
+    Rule('bip39_seed', _BIP39_SEED, '\\1[REDACTED:bip39_seed]', need=('mnemonic', 'seed', 'recovery')),
     Rule('env_secret', _ENV_SECRET, _keyed('env_secret')),
-    Rule('secret_word', _SECRET_WORD, _keyed('secret_word')),
+    Rule('secret_word', _SECRET_WORD, _keyed('secret_word'), need=('passphrase', 'credentials')),
     # ponytail: assignment before prefix — avoids double-[REDACTED] when both match same value
     Rule('assignment', _ASSIGNMENT, _keyed('assignment')),
     Rule('prefix', _PREFIX, _prefixed),
-    Rule('conn_str', _CONN_STR, '\\1[REDACTED:conn_str]@'),
-    Rule('jwt', _JWT, '[REDACTED:jwt]'),
-    Rule('phone', _PHONE, '[REDACTED:phone]'),
+    Rule('conn_str', _CONN_STR, '\\1[REDACTED:conn_str]@', need=('://',)),
+    Rule('jwt', _JWT, '[REDACTED:jwt]', need=('eyj',)),
+    Rule('phone', _PHONE, '[REDACTED:phone]', need=('+',)),
     Rule('card', _CARD, _redact_card),
     # Off by default.
     Rule('email', _EMAIL, '[REDACTED:email]', False),
@@ -352,7 +353,10 @@ def _guard(repl, allow):
 
 
 def redact_regex(text: str, rules=None, allow=()) -> str:
+    lower = text.lower()
     for rule in _DEFAULT_RULES if rules is None else rules:
+        if rule.need and not any(literal in lower for literal in rule.need):
+            continue
         text = rule.pattern.sub(_guard(rule.repl, allow), text)
     return text
 
