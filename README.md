@@ -213,6 +213,11 @@ These override the file, so a project can set its own rules through the `env` bl
 | `REDACT_CONFIG` | `$CLAUDE_CONFIG_DIR/redact.toml`, else `~/.claude/redact.toml` | Config file path |
 | `REDACT_AGGRESSIVE` | unset | `1` is an alias for `REDACT_ENABLE=entropy` |
 
+`entropy` also switches on by itself for one result when the command prints a
+whole environment or a secrets file: `env`, `printenv`, `set`, `export -p`,
+`declare -x`, or `cat`/`less`/`head`/`tail` of `.env*`, `.envrc`, `.netrc`,
+`.pgpass`, `credentials`. A rule in `disable` stays off.
+
 ## Plugin installation (Claude Code skill)
 
 This directory contains a `.claude-plugin/` with an `install-redact-hook` skill. To load it in Claude Code, add to `~/.claude/settings.json`:

@@ -258,6 +258,20 @@ _CONTROL_SPLIT = re.compile(
     r'(?=[\w.\-+/=])'
 )
 
+# Commands whose whole output is secrets: an environment dump, or a secrets file
+# printed. For those the entropy rule runs on that one result.
+_ENV_DUMP = re.compile(
+    r'(?:^|[\s;&|(`\'"])(?:env|printenv(?:\s+\w+)?|set|export\s+-p|declare\s+-[px]+)'
+    r'\s*(?=$|[;&|)`\'"])'
+    r'|\b(?:cat|less|more|head|tail|bat|strings)\b[^;&|\n]*?(?<![\w.-])'
+    r'(?:\.env(?:\.[\w.-]+)?|\.envrc|\.netrc|\.pgpass|credentials(?:\.json)?)(?![\w.-])',
+    re.MULTILINE,
+)
+
+
+def _dumps_env(command: str) -> bool:
+    return bool(_ENV_DUMP.search(command))
+
 
 def _random_enough(value: str) -> bool:
     """A secret is long or has digits. `re.compile` and `npm_check.py` are neither."""
@@ -503,10 +517,10 @@ def _nested_repeat(items, inside=False) -> bool:
     return False
 
 
-def active_rules(config: dict) -> tuple:
+def active_rules(config: dict, aggressive=False) -> tuple:
     off = set(config.get("disable", [])) | _env_list("REDACT_DISABLE")
     on = set(config.get("enable", [])) | _env_list("REDACT_ENABLE")
-    if os.environ.get("REDACT_AGGRESSIVE"):
+    if aggressive or os.environ.get("REDACT_AGGRESSIVE"):
         on.add("entropy")
     rules = [r for r in _RULES if (r.on or r.name in on) and r.name not in off]
     for spec in config.get("rule", []):
@@ -711,6 +725,21 @@ _EXACT = [
     ("Tr0ub4dor 3 is not it", "Tr0ub4dor 3 is not it"),
 ]
 
+_COMMANDS = [
+    ("env", True),
+    ("sudo printenv | sort", True),
+    ("printenv API_KEY", True),
+    ("ssh prod 'env'", True),
+    ("docker exec -it app env", True),
+    ("export -p", True),
+    ("cat app/.env.local", True),
+    ("tail -n 20 ~/.netrc && echo", True),
+    ("env FOO=1 make test", False),
+    ("cat README.md", False),
+    ("cat .envoy.yaml", False),
+    ("git config --unset user.name", False),
+]
+
 _NESTED = [
     (r'(a+)+', True),
     (r'(\w+\s?)*', True),
@@ -760,6 +789,9 @@ def self_check() -> int:
     for sample, want in _EXACT:
         if redact_regex(sample, exact) != want:
             bad.append(f"secret_file wrong on {sample!r}")
+    for command, dump in _COMMANDS:
+        if _dumps_env(command) != dump:
+            bad.append(f"env dump check wrong on {command!r}")
     for shape in _SHAPES:
         out = _redact_tree(shape, redact_regex)
         if not _same_shape(shape, out) or _LEAK[9:] in json.dumps(out):
@@ -784,7 +816,9 @@ def main() -> None:
     if data.get("tool_name") in _SKIP_TOOLS:
         return
     config = load_config()
-    rules, allow = active_rules(config), allow_patterns(config)
+    command = (data.get("tool_input") or {}).get("command")
+    dump = isinstance(command, str) and _dumps_env(command)
+    rules, allow = active_rules(config, dump), allow_patterns(config)
     exact = exact_rule(load_secrets())
     if exact:
         rules = (exact,) + rules
