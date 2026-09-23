@@ -91,6 +91,23 @@ The eight off-by-default rules are off because cutting mail addresses, home path
 Python 3.8 or newer, no packages to install. Python 3.11 adds `tomllib`, which
 the optional config file needs.
 
+No Python at all? Each [release](https://github.com/SilentAutomaton/redact-hook/releases)
+carries a single-file binary for Linux x86_64, Linux aarch64 and macOS arm64,
+built from the same `redact_output.py` with its interpreter inside, so
+`redact.toml`, `redact.secrets` and the `REDACT_*` variables work the same:
+
+```bash
+curl -LO https://github.com/SilentAutomaton/redact-hook/releases/latest/download/redact-hook-linux-x86_64
+curl -LO https://github.com/SilentAutomaton/redact-hook/releases/latest/download/redact-hook-linux-x86_64.sha256
+sha256sum -c redact-hook-linux-x86_64.sha256
+install -Dm755 redact-hook-linux-x86_64 ~/.claude/hooks/redact-hook
+~/.claude/hooks/redact-hook --self-check
+```
+
+Then point the `command` in step 2 at `~/.claude/hooks/redact-hook` (in full)
+and skip step 1. The first run unpacks the binary into your cache directory;
+later runs start from there.
+
 ### 1. Get the hook and check it
 
 ```bash

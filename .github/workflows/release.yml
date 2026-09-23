@@ -1,0 +1,45 @@
+name: release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  binary:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            name: redact-hook-linux-x86_64
+          - runner: ubuntu-22.04-arm
+            name: redact-hook-linux-aarch64
+          - runner: macos-14
+            name: redact-hook-macos-arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - if: runner.os == 'Linux'
+        run: sudo apt-get install -y patchelf
+      - run: pip install nuitka==4.2.2 zstandard==0.25.0
+      - run: python redact_output.py --self-check
+      - name: build
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          python -m nuitka --onefile --assume-yes-for-downloads \
+            --onefile-tempdir-spec="{CACHE_DIR}/redact-hook/{VERSION}" \
+            --product-version="$version" \
+            --output-filename="${{ matrix.name }}" redact_output.py
+      - run: ./${{ matrix.name }} --self-check
+      - name: upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          shasum -a 256 "${{ matrix.name }}" > "${{ matrix.name }}.sha256"
+          gh release upload "$GITHUB_REF_NAME" "${{ matrix.name }}" "${{ matrix.name }}.sha256" --clobber
