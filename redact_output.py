@@ -143,7 +143,7 @@ _TELEGRAM_SESSION = re.compile(
 # HTTP request auth. Shows up in `curl -v`, in proxy logs, in MCP transports.
 _BASIC_AUTH = re.compile(r'(Authorization:\s*Basic\s+)[A-Za-z0-9+/=]{8,}', re.IGNORECASE)
 _AUTH_HEADER = re.compile(
-    r'((?:X-)?(?:Api|Auth|Access|Session)[-_](?:Key|Token|Secret)\s*:\s*)\S{8,}',
+    r'((?:X-)?(?:Api|Auth|Access|Session)[-_](?:Key|Token|Secret)\s*:\s*)[^\s"\'`]{8,}',
     re.IGNORECASE,
 )
 _COOKIE = re.compile(
@@ -155,7 +155,7 @@ _COOKIE = re.compile(
 _CLI_USERPASS = re.compile(r'((?:-u|--user)\s+[^\s:]+:)\S+')
 _CLI_PASSWORD = re.compile(r'(--(?:password|pass|token|api-key)[= ])\S{4,}')
 _NETRC = re.compile(
-    r'(machine\s+\S+(?:\s+(?:login|account)\s+\S+)?\s+password\s+)\S+',
+    r'(machine\s+\S+(?:\s+(?:login|account)\s+\S+)?\s+password\s+)[^\s"\'`]+',
     re.IGNORECASE,
 )
 
@@ -330,6 +330,8 @@ def _redact_repr(match: re.Match) -> str:
     value = match.group('v')
     if value[0] in '${<%' or not _random_enough(value):  # ${VAR}, {{ tpl }}, <placeholder>, %s
         return match.group(0)
+    if re.fullmatch(r'\[REDACTED:\w+\]', value):  # an earlier rule already cut all of it
+        return match.group(0)
     head = match.group(0)[:match.start('v') - match.start()]
     return f"{head}[REDACTED:py_repr]{match.group('q2')}"
 
@@ -346,7 +348,8 @@ def _keyed(name: str) -> Callable[[re.Match], str]:
     def repl(match: re.Match) -> str:
         if not _random_enough(match.group(2)):
             return match.group(0)
-        return f'{match.group(1)}=[REDACTED:{name}]'
+        whole, start = match.group(0), match.start()
+        return f'{whole[:match.start(2) - start]}[REDACTED:{name}]{whole[match.end(2) - start:]}'
     return repl
 
 
@@ -749,6 +752,16 @@ _EXACT = [
     ("Tr0ub4dor 3 is not it", "Tr0ub4dor 3 is not it"),
 ]
 
+# Only the value goes; quotes, separators and what follows stay. Assembled.
+_VAL = "Xk7pQ2mZ" + "r9TvB4nL"
+_EXACT_CUT = [
+    ('"X-Api-Key: ' + _VAL + '"),', '"X-Api-Key: [REDACTED:auth_header]"),'),
+    ('"machine h login u password ' + _VAL + '"),', '"machine h login u password [REDACTED:netrc]"),'),
+    ('"passphrase=' + _VAL + '"),', '"passphrase=[REDACTED:secret_word]"),'),
+    ("password: '" + _VAL + "',", "password: '[REDACTED:assignment]',"),
+    ('DB_PASS="' + _VAL + '"', 'DB_PASS="[REDACTED:env_secret]"'),
+]
+
 _COMMANDS = [
     ("env", True),
     ("sudo printenv | sort", True),
@@ -825,6 +838,10 @@ def self_check() -> int:
     for sample, want in _EXACT:
         if redact_regex(sample, exact) != want:
             bad.append(f"secret_file wrong on {sample!r}")
+    for sample, want in _EXACT_CUT:
+        out = redact_regex(sample)
+        if out != want:
+            bad.append(f"cut too much: {sample!r} -> {out!r}")
     for command, dump in _COMMANDS:
         if _dumps_env(command) != dump:
             bad.append(f"env dump check wrong on {command!r}")
