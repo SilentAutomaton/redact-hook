@@ -295,6 +295,11 @@ Rule shapes come from [gitleaks](https://github.com/gitleaks/gitleaks) and [dete
 
 Three ideas were borrowed from other Claude Code redactors: named rules and a value allowlist from [redacted](https://github.com/svn-arv/redacted), type-preserving placeholders from [cc-redact](https://github.com/ShindouMihou/cc-redact), and the PreToolUse/PostToolUse limitation above, which [claude-code-redaction-hooks](https://github.com/l-mb/claude-code-redaction-hooks) documents clearly. [claude-code-redact](https://github.com/paroque28/claude-code-redact) takes the heavier road — a local proxy with round-trip un-redaction — if you want no coverage gaps and do not mind the dependencies.
 
+## Hermes
+
+[hermes_redact](https://github.com/SilentAutomaton/hermes_redact) brings the same rules to the
+[Hermes](https://github.com/NousResearch/hermes-agent) agent as a plugin.
+
 ## Licence
 
 MIT. See `LICENSE`.
